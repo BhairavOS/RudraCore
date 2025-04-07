@@ -1,0 +1,20 @@
+{
+    "$schema": "https://schemas.cute.engineering/stable/cutekit.manifest.component.v1",
+    "id": "rudracore-x86_64",
+    "type": "lib",
+    "description": "The Rudracore micro-kernel platform layer for x86_64",
+    "enableIf": {
+        "sys": [
+            "rudracore"
+        ],
+        "arch": [
+            "x86_64"
+        ]
+    },
+    "requires": [
+        "rudra-x86_64"
+    ],
+    "provides": [
+        "rudracore-arch"
+    ]
+}
