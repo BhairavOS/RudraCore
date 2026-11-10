@@ -301,10 +301,27 @@ Arch::Frame* onTimerTick(Arch::Frame* frame) {
 // were preempted: it's waiting on something that just happened (a reply, a
 // key press), so running it right away keeps IPC fast and input responsive.
 void wake(Task* task) {
-    if (task->state != TaskState::Blocked)
+    if (task->state == TaskState::Sleeping) {
+        // A timed wait ending early: take it off the sleep list.
+        for (Task** link = &sleeping; *link; link = &(*link)->next) {
+            if (*link == task) {
+                *link = task->next;
+                break;
+            }
+        }
+    } else if (task->state != TaskState::Blocked) {
         return;
+    }
     task->state = TaskState::Ready;
     enqueueFront(task);
+}
+
+Arch::Frame* blockCurrentUntil(Arch::Frame* frame, u64 deadline) {
+    if (currentTask == idleTask)
+        panic("sched: the idle task can't block");
+    currentTask->wakeAt = deadline;
+    currentTask->state = TaskState::Sleeping;
+    return switchFrom(frame);
 }
 
 Arch::Frame* blockCurrent(Arch::Frame* frame) {

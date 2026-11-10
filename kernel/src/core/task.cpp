@@ -1,3 +1,4 @@
+#include "core/channel.h"
 #include "core/sched.h"
 
 namespace Rudracore::Core {
@@ -28,6 +29,13 @@ Object* Task::takeHandle(u64 h) {
 void Task::releaseResources() {
     for (auto& object : handles) {
         if (object) {
+            // An endpoint may outlive this handle (another reference holds
+            // it): it must not keep pointing at this task as its waiter.
+            if (object->type == ObjectType::Channel) {
+                auto* endpoint = static_cast<Endpoint*>(object);
+                if (endpoint->waiter == this)
+                    endpoint->waiter = nullptr;
+            }
             object->unref();
             object = nullptr;
         }

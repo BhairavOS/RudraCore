@@ -80,9 +80,17 @@ inline long recv(Handle endpoint, void* buffer, unsigned long capacity,
     return syscall(SYS_CHANNEL_RECV, endpoint, arg(buffer), capacity, arg(attached), flags);
 }
 
+// Waits until one of `endpoints` has a message (or its peer closed), or the
+// timeout passes. Returns the index of a ready endpoint, or TIMED_OUT.
+inline long wait(Handle const* endpoints, unsigned long count, unsigned long timeoutMs = WAIT_FOREVER) {
+    return syscall(SYS_WAIT, arg(endpoints), count, timeoutMs);
+}
+
 // MARK: Memory
 
 inline long memoryCreate(unsigned long size) { return syscall(SYS_MEMORY_CREATE, size); }
+
+inline long memoryUnmap(void* address) { return syscall(SYS_MEMORY_UNMAP, arg(address)); }
 
 // Returns the address, or nullptr on failure.
 inline void* memoryMap(Handle memory) {

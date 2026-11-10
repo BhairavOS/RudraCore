@@ -156,6 +156,7 @@ Arch::Frame* sysSystemInfo(Call const& c, Boot::Info const& boot) {
     info.totalMemory = stats.managedPages * Mem::PAGE_SIZE;
     info.freeMemory = stats.freePages * Mem::PAGE_SIZE;
     info.taskCount = Sched::taskCount();
+    info.timeOfDay = Time::timeOfDay();
     if (boot.hasFramebuffer) {
         auto const& fb = boot.framebuffer;
         info.screenWidth = fb.width;
@@ -283,7 +284,75 @@ Arch::Frame* sysChannelRecv(Call const& c) {
     return c.result(size);
 }
 
+// Waits for any of several endpoints. Like recv, a wait that blocks runs
+// again from the start when woken; task->waitDeadline remembers the
+// deadline across those runs (and is cleared whenever the call returns).
+Arch::Frame* sysWait(Call const& c) {
+    u64 address = c.arg0();
+    u64 count = c.arg1();
+    u64 timeout = c.arg2();
+    Task* task = c.task;
+
+    auto finish = [&](i64 result, Core::Endpoint* const* endpoints, u64 n) {
+        for (u64 i = 0; i < n; i++) {
+            if (endpoints[i]->waiter == task)
+                endpoints[i]->waiter = nullptr;
+        }
+        task->waitDeadline = 0;
+        return c.result(result);
+    };
+
+    if (count == 0 or count > Abi::MAX_WAIT)
+        return finish(Abi::INVALID_ARGUMENT, nullptr, 0);
+    if (not c.userMemory(address, count * sizeof(Abi::Handle)))
+        return finish(Abi::BAD_ADDRESS, nullptr, 0);
+
+    Abi::Handle handles[Abi::MAX_WAIT];
+    memcpy(handles, reinterpret_cast<void const*>(address), count * sizeof(Abi::Handle));
+
+    Core::Endpoint* endpoints[Abi::MAX_WAIT];
+    for (u64 i = 0; i < count; i++) {
+        i64 error = 0;
+        endpoints[i] = c.lookup<Core::Endpoint>(handles[i], ObjectType::Channel, error);
+        if (not endpoints[i])
+            return finish(error, endpoints, i);
+        if (endpoints[i]->waiter and endpoints[i]->waiter != task)
+            return finish(Abi::INVALID_ARGUMENT, endpoints, i); // one waiter per endpoint
+    }
+
+    for (u64 i = 0; i < count; i++) {
+        if (not endpoints[i]->empty() or not endpoints[i]->peer)
+            return finish(static_cast<i64>(i), endpoints, count);
+    }
+
+    u64 now = Time::now();
+    if (timeout == 0 or (task->waitDeadline and now >= task->waitDeadline))
+        return finish(Abi::TIMED_OUT, endpoints, count);
+
+    for (u64 i = 0; i < count; i++)
+        endpoints[i]->waiter = task;
+
+    c.frame->rip -= INT80_LENGTH; // run the call again when woken
+    if (timeout == Abi::WAIT_FOREVER)
+        return Sched::blockCurrent(c.frame);
+    if (not task->waitDeadline)
+        task->waitDeadline = now + timeout;
+    return Sched::blockCurrentUntil(c.frame, task->waitDeadline);
+}
+
 // MARK: Memory
+
+Arch::Frame* sysMemoryUnmap(Call const& c) {
+    for (auto& mapping : c.task->mappings) {
+        if (mapping.object and mapping.address == c.arg0()) {
+            c.task->space->unmap(mapping.address, mapping.size);
+            mapping.object->unref();
+            mapping = {};
+            return c.result(Abi::OK);
+        }
+    }
+    return c.result(Abi::NOT_FOUND);
+}
 
 Arch::Frame* sysMemoryCreate(Call const& c) {
     auto* memory = Core::SharedMemory::allocate(c.arg0());
@@ -464,10 +533,12 @@ Arch::Frame* dispatch(Arch::Frame* frame) {
     case Abi::SYS_CHANNEL_CREATE: return sysChannelCreate(c);
     case Abi::SYS_CHANNEL_SEND: return sysChannelSend(c);
     case Abi::SYS_CHANNEL_RECV: return sysChannelRecv(c);
+    case Abi::SYS_WAIT: return sysWait(c);
 
     case Abi::SYS_MEMORY_CREATE: return sysMemoryCreate(c);
     case Abi::SYS_MEMORY_MAP: return sysMemoryMap(c);
     case Abi::SYS_MEMORY_ALLOC: return sysMemoryAlloc(c);
+    case Abi::SYS_MEMORY_UNMAP: return sysMemoryUnmap(c);
 
     case Abi::SYS_IRQ_WAIT: return sysIrqWait(c);
     case Abi::SYS_PORT_IN: return sysPortIn(c);

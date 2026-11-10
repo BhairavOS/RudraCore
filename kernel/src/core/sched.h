@@ -40,6 +40,7 @@ struct Task {
 
     Vmm::Space* space = nullptr; // nullptr for kernel tasks
     u64 wakeAt = 0;
+    u64 waitDeadline = 0; // while in a timed SYS_WAIT: when it gives up (0 = none)
     i64 exitCode = 0;
 
     Task* next = nullptr; // link in the ready, sleep or zombie list
@@ -100,7 +101,8 @@ void sleep(u64 milliseconds);
 // Run by the boot task once setup is done: enables interrupts and waits.
 [[noreturn]] void idle();
 
-// Makes a Blocked task runnable again. Interrupts must be disabled.
+// Makes a Blocked task runnable again, or ends a timed wait (a Sleeping
+// task) early. Interrupts must be disabled.
 void wake(Core::Task* task);
 
 // For interrupt handlers (interrupts disabled). Each returns the frame of
@@ -113,5 +115,8 @@ Arch::Frame* exitCurrent(Arch::Frame* frame, i64 code);
 // Blocks the current task until something calls wake() on it. The caller
 // must have registered the task with the object it waits on first.
 Arch::Frame* blockCurrent(Arch::Frame* frame);
+
+// Same, but also wakes up by itself at `deadline` (milliseconds since boot).
+Arch::Frame* blockCurrentUntil(Arch::Frame* frame, u64 deadline);
 
 } // namespace Rudracore::Sched

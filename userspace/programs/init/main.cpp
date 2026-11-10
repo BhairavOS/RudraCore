@@ -6,7 +6,7 @@
 //   3: the keyboard interrupt
 //   4: the mouse interrupt
 // init decides who gets what: it starts each driver and program with just
-// the handles that program needs. In the next step it starts KamalShell🪷.
+// the handles that program needs, and finally KamalShell🪷.
 
 #include <kapala/channel.h>
 #include <kapala/protocol/input.h>
@@ -123,11 +123,11 @@ int main() {
         echoKeyboard(input);
 
     // Leave the boot screen up for a moment, then hand the screen and the
-    // input to the showcase app.
+    // input to KamalShell, which starts the apps.
     Sys::sleep(1500);
-    Sys::Handle app[] = {Sys::INIT_HANDLE_FRAMEBUFFER, input.release()};
-    if (Sys::spawn("showcase", app, 2) < 0)
-        Sys::log("can't start the showcase");
+    Sys::Handle shell[] = {Sys::INIT_HANDLE_FRAMEBUFFER, input.release()};
+    if (Sys::spawn("kamalshell", shell, 2) < 0)
+        Sys::log("can't start KamalShell");
 
     for (;;)
         Sys::sleep(60 * 1000);

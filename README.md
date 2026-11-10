@@ -29,9 +29,11 @@ The compiler, assembler, ISO tools and QEMU all run inside a container.
 ```
 
 For a QEMU window on Windows: `winget install SoftwareFreedomConservancy.QEMU`.
-After the boot screen, the Kapalaframe showcase takes over: move the mouse,
-click "Say namaste", and type into the text field (Enter logs the line).
-Click inside the QEMU window to give it the mouse; Ctrl+Alt+G releases it.
+After the boot screen, KamalShell🪷 starts with the About window open.
+Click the lotus in the corner to open the launcher (About, Notes, System
+Monitor), drag windows by their title bar, click one to bring it to the
+front, and close it with its x. Click inside the QEMU window to give it the
+mouse; Ctrl+Alt+G releases it.
 
 On Linux, install the packages listed in the `Dockerfile` and run `make`,
 `make run`, `make run-uefi` or `make shot` directly.
@@ -82,10 +84,40 @@ numbers. Holding a handle is the permission to use the object:
 At boot the kernel starts one program, **init**, and gives it handles to the
 hardware. init starts every other program with only the handles it needs:
 the `ps2` driver gets the controller's ports and the keyboard and mouse IRQs
-plus a channel for input events; the `showcase` app gets the screen and the
+plus a channel for input events; **KamalShell** gets the screen and the
 other end of that channel. When a program maps the screen, the kernel stops
 drawing on it (logs continue on serial; a panic still takes the screen back).
+A program can wait on many channels at once, with a timeout (`SYS_WAIT`).
 System calls are listed in `abi/rudracore/syscalls.h`.
+
+## KamalShell🪷
+
+The compositor and desktop (`userspace/programs/kamalshell/`). Apps are
+separate programs: the shell starts each one with a channel to itself, the
+app draws its window into shared memory, and the shell composes all windows
+(rounded corners, shadows, focus, dragging) with the taskbar, launcher and
+clock. Only changed areas are redrawn. The protocol is in
+`kapala/protocol/shell.h`; apps use `Kapala::Window`:
+
+```cpp
+Window window;
+window.open("Hello", 400, 300);
+Canvas canvas(window.surface());
+canvas.fill(window.surface().bounds(), Theme::SURFACE);
+canvas.text({20, 20}, "namaste", Theme::SAFFRON, 2);
+window.present();
+
+for (;;) {
+    WindowEvent e;
+    window.waitEvent(e);
+    if (e.kind == WindowEvent::Close)
+        return 0;
+}
+```
+
+To add an app: create `userspace/programs/<name>/main.cpp`, add
+`module = /boot/<name>.elf` to `boot/shool.cfg` (and `boot/limine.conf`),
+and add it to `APPS` in KamalShell's `main.cpp`.
 
 Programs can use floating point and SSE: the kernel saves each task's FPU
 registers on every switch (the kernel itself is built without SSE).
@@ -100,8 +132,10 @@ The library every program links against (`userspace/kapalaframe/`):
 | `kapala/channel.h` | `Channel`: typed messages over channels |
 | `kapala/heap.h` | The heap behind `new` and `delete` |
 | `kapala/gfx.h` | `Bitmap`, `Color`, `Rect` and `Canvas`: clipped, anti-aliased rounded rectangles, circles, gradients, shadows, text and images, plus the Bhairav OS theme colors |
+| `kapala/window.h` | `Window`: a window on KamalShell, with events and timeouts |
 | `kapala/text.h` | `Text`: build strings without the heap |
 | `kapala/protocol/input.h` | Keyboard and mouse events |
+| `kapala/protocol/shell.h` | The KamalShell window protocol |
 
 ## Layout
 
@@ -125,8 +159,9 @@ The library every program links against (`userspace/kapalaframe/`):
 | `legacy/` | Earlier sources, kept for reference, not built |
 
 Programs today: `init` (root of userspace), `ps2` (keyboard and mouse
-driver), `showcase` (the first Kapalaframe app), and `ipc-test`,
-`protect-test` and `fpu-test` (checks run at every boot).
+driver), `kamalshell` (the desktop), the apps `about`, `notes` and
+`monitor`, and `ipc-test`, `protect-test` and `fpu-test` (checks run at
+every boot).
 
 ## Roadmap
 
@@ -143,9 +178,13 @@ Bhairav OS is built from scratch, one working step at a time:
    config file, screen-mode selection and trident boot screen; Limine stays
    only for legacy BIOS
 6. **Kapalaframe + drivers** ✅: floating point in programs, program heap,
-   IRQs as messages, PS/2 keyboard + mouse driver, Kapalaframe graphics,
-   and the showcase app
-7. **KamalShell🪷**: the compositor and graphical shell
+   IRQs as messages, PS/2 keyboard + mouse driver, Kapalaframe graphics
+7. **KamalShell🪷** ✅: compositor, windows (focus, drag, close), taskbar,
+   launcher, clock; apps About, Notes and System Monitor; multi-channel
+   wait with timeouts
+
+Next: storage (a disk driver and a file system, so apps can save), a
+terminal, multi-core, USB input, and smoother text.
 
 ## License
 

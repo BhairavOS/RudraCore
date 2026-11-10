@@ -213,11 +213,133 @@ void Canvas::strokeRounded(Rect full, float radius, float width, Color c) {
 }
 
 void Canvas::shadow(Rect r, float radius, int spread, Color c) {
-    // Layers of growing, fading rounded rectangles approximate a blur.
-    for (int i = spread; i >= 1; i--) {
-        float t = 1.0f - float(i) / float(spread + 1);
-        Color layer = c.withAlpha(static_cast<unsigned char>(c.a * t * t / spread * 2.0f));
-        fillRounded(Rect{r.x - i, r.y - i + spread / 3, r.w + 2 * i, r.h + 2 * i}, radius + i, layer);
+    // One pass: darkness fades with the distance from the (shifted-down)
+    // shape. The inside is skipped, since the shape itself covers it.
+    Rect shape = r.offset(0, spread / 3);
+    float hw = shape.w / 2.0f, hh = shape.h / 2.0f;
+    radius = fmin(radius, fmin(hw, hh));
+    float cx = shape.x + hw, cy = shape.y + hh;
+    Rect inner = r.inset(static_cast<int>(radius));
+
+    Rect area = Rect{shape.x - spread, shape.y - spread, shape.w + 2 * spread, shape.h + 2 * spread};
+    area = area.intersect(clip).intersect(_target.bounds());
+    for (int y = area.y; y < area.bottom(); y++) {
+        unsigned* row = _target.row(y);
+        bool innerRow = y >= inner.y and y < inner.bottom();
+        for (int x = area.x; x < area.right(); x++) {
+            if (innerRow and x >= inner.x and x < inner.right()) {
+                x = inner.right() - 1; // jump over the covered middle
+                continue;
+            }
+            float d = roundedDistance(x + 0.5f, y + 0.5f, cx, cy, hw, hh, radius);
+            if (d >= spread)
+                continue;
+            float t = d <= 0 ? 1.0f : 1.0f - d / spread;
+            blend(row[x], c, t * t);
+        }
+    }
+}
+
+void Canvas::lotus(float cx, float baseY, float size, unsigned char alpha) {
+    struct Petal {
+        float sin, cos, length, width;
+        Color color;
+    };
+    // Back to front: outer pair (60 degrees), middle pair (30), center.
+    Petal const petals[] = {
+        {0.866f, 0.5f, 0.70f, 0.30f, Color::hex(0xC2185B)},
+        {-0.866f, 0.5f, 0.70f, 0.30f, Color::hex(0xC2185B)},
+        {0.5f, 0.866f, 0.90f, 0.33f, Theme::LOTUS},
+        {-0.5f, 0.866f, 0.90f, 0.33f, Theme::LOTUS},
+        {0.0f, 1.0f, 1.00f, 0.36f, Theme::LOTUS_LIGHT},
+    };
+    Color const tip = Color::hex(0xFFE0EA);
+
+    Rect box{static_cast<int>(cx - size * 1.9f), static_cast<int>(baseY - size * 2.0f),
+             static_cast<int>(size * 3.8f) + 2, static_cast<int>(size * 2.0f) + 2};
+    box = box.intersect(clip).intersect(_target.bounds());
+
+    for (auto const& p : petals) {
+        float a = p.length * size, b = p.width * size;
+        float pcx = cx + p.sin * a, pcy = baseY - p.cos * a; // petal center
+        for (int y = box.y; y < box.bottom(); y++) {
+            unsigned* row = _target.row(y);
+            for (int x = box.x; x < box.right(); x++) {
+                float dx = x + 0.5f - pcx, dy = y + 0.5f - pcy;
+                float u = dx * p.sin - dy * p.cos; // along the petal, toward the tip
+                float v = dx * p.cos + dy * p.sin; // across
+                float w = u > 0 ? b * (1.0f - 0.6f * u / a) : b; // narrower toward the tip
+                if (w <= 0.5f)
+                    continue;
+                float e = sqrt((u / a) * (u / a) + (v / w) * (v / w));
+                float coverage = clamp01((1.0f - e) * fmin(a, w) + 0.5f);
+                if (coverage <= 0)
+                    continue;
+                Color c = p.color.mix(tip, clamp01((u + a) / (2 * a)) * 0.75f).withAlpha(alpha);
+                blend(row[x], c, coverage * 0.92f);
+            }
+        }
+    }
+}
+
+int Canvas::paragraph(Rect box, char const* text, Color c, int lineHeight) {
+    Font const& font = Font::system();
+    int perLine = box.w / font.width;
+    if (perLine <= 0)
+        return 0;
+    int y = box.y;
+    char line[256];
+
+    while (*text) {
+        while (*text == ' ')
+            text++;
+        // Take as many whole words as fit.
+        int n = 0, lastBreak = -1;
+        while (text[n] and text[n] != '\n' and n < perLine) {
+            if (text[n] == ' ')
+                lastBreak = n;
+            n++;
+        }
+        if (text[n] and text[n] != '\n' and text[n] != ' ' and lastBreak > 0)
+            n = lastBreak;
+
+        int len = n < 255 ? n : 255;
+        for (int i = 0; i < len; i++)
+            line[i] = text[i];
+        line[len] = '\0';
+        this->text({box.x, y}, line, c);
+        y += lineHeight;
+
+        text += n;
+        if (*text == '\n')
+            text++;
+    }
+    return y - box.y;
+}
+
+void Canvas::blit(Bitmap const& source, Point at, Rect mask, float maskRadius) {
+    Rect r = Rect{at.x, at.y, source.width, source.height}.intersect(clip).intersect(_target.bounds());
+    bool masked = not mask.empty();
+    if (masked)
+        r = r.intersect(mask);
+
+    float hw = mask.w / 2.0f, hh = mask.h / 2.0f;
+    float radius = fmin(maskRadius, fmin(hw, hh));
+    float cx = mask.x + hw, cy = mask.y + hh;
+    int corner = static_cast<int>(radius + 1);
+
+    for (int y = r.y; y < r.bottom(); y++) {
+        unsigned* dest = _target.row(y);
+        unsigned const* src = source.row(y - at.y) - at.x;
+        bool cornerRow = masked and (y < mask.y + corner or y >= mask.bottom() - corner);
+        for (int x = r.x; x < r.right(); x++) {
+            if (cornerRow and (x < mask.x + corner or x >= mask.right() - corner)) {
+                float d = roundedDistance(x + 0.5f, y + 0.5f, cx, cy, hw, hh, radius);
+                blend(dest[x], source.unpack(src[x]), clamp01(0.5f - d));
+            } else {
+                dest[x] = src[x];
+            }
+        }
     }
 }
 

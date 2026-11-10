@@ -126,16 +126,30 @@ public:
     void fillRoundedGradient(Rect r, float radius, Color left, Color right); // horizontal
     void strokeRounded(Rect r, float radius, float width, Color c);
 
-    // A soft shadow under a rounded rectangle.
+    // A soft shadow around a rounded rectangle (slightly below it). Only the
+    // part outside the rectangle is drawn: it's meant to sit under an
+    // opaque shape.
     void shadow(Rect r, float radius, int spread, Color c);
 
     void fillCircle(float cx, float cy, float radius, Color c);
 
+    // The Bhairav OS lotus: five petals rising from (cx, baseY).
+    void lotus(float cx, float baseY, float size, unsigned char alpha = 255);
+
     // Draws text with its top-left corner at `at`. Returns the x after it.
     int text(Point at, char const* text, Color c, int scale = 1);
 
+    // Draws text wrapped at word boundaries inside `box`. Returns the
+    // height used.
+    int paragraph(Rect box, char const* text, Color c, int lineHeight = 20);
+
     // Draws an RGBA image (bytes R, G, B, A per pixel) blended over the canvas.
     void image(Point at, unsigned char const* rgba, int width, int height);
+
+    // Copies a bitmap (same pixel format) with its top-left corner at `at`.
+    // With a `mask`, pixels outside that rounded rectangle are left out
+    // (anti-aliased), e.g. to round a window's bottom corners.
+    void blit(Bitmap const& source, Point at, Rect mask = {}, float maskRadius = 0);
 
     Rect clip;
 

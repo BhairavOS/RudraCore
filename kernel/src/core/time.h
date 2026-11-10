@@ -15,4 +15,7 @@ void tick();
 // Milliseconds since the timer started.
 u64 now();
 
+// Seconds since midnight (UTC), from the hardware clock read at boot.
+u64 timeOfDay();
+
 } // namespace Rudracore::Time

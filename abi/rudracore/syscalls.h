@@ -39,11 +39,16 @@ enum Syscall : unsigned long {
                              //   Never blocks. `attach` (or NO_HANDLE) moves to the receiver.
     SYS_CHANNEL_RECV = 13,   // (Handle endpoint, void* buffer, usize capacity, Handle* attached, u64 flags)
                              //   -> message length. Waits for a message unless RECV_NONBLOCK.
+    SYS_WAIT = 14,           // (Handle const* endpoints, usize count, u64 timeoutMs)
+                             //   Waits until one of up to MAX_WAIT endpoints has a message (or its
+                             //   peer closed), or until the timeout (WAIT_FOREVER: no limit; 0: just
+                             //   check). Returns the index of a ready endpoint, or TIMED_OUT.
 
     // Memory
     SYS_MEMORY_CREATE = 20, // (usize size) -> Handle to new zeroed shared memory
     SYS_MEMORY_MAP = 21,    // (Handle memory) -> address where it's mapped (read + write)
     SYS_MEMORY_ALLOC = 22,  // (usize size) -> address of new zeroed private memory (read + write)
+    SYS_MEMORY_UNMAP = 23,  // (address returned by SYS_MEMORY_MAP): remove that mapping
 
     // Devices (drivers only: needs a handle given by init)
     SYS_IRQ_WAIT = 30,  // (Handle irq): waits for the interrupt to fire
@@ -66,6 +71,8 @@ enum RecvFlags : unsigned long {
 };
 
 constexpr unsigned long MAX_MESSAGE_SIZE = 128;
+constexpr unsigned long MAX_WAIT = 32;
+constexpr unsigned long WAIT_FOREVER = ~0ul;
 
 enum Error : long {
     OK = 0,
@@ -81,6 +88,7 @@ enum Error : long {
     NOT_FOUND = -10,
     BUFFER_TOO_SMALL = -11,
     OUT_OF_MEMORY = -12,
+    TIMED_OUT = -13,
 };
 
 // Handles init starts with (when the hardware exists).
@@ -102,6 +110,8 @@ struct SystemInfo {
     unsigned long screenHeight;
     unsigned long screenPitch; // bytes per row
     unsigned char redShift, greenShift, blueShift, reserved;
+
+    unsigned long timeOfDay; // seconds since midnight, from the hardware clock (UTC)
 };
 
 } // namespace Rudracore::Abi
