@@ -90,9 +90,22 @@ inline void* memoryMap(Handle memory) {
     return result < 0 ? nullptr : reinterpret_cast<void*>(result);
 }
 
+// Fresh zeroed private memory, or nullptr. (Most code uses `new` instead.)
+inline void* memoryAlloc(unsigned long size) {
+    long result = syscall(SYS_MEMORY_ALLOC, size);
+    return result < 0 ? nullptr : reinterpret_cast<void*>(result);
+}
+
 // MARK: Devices
 
 inline long irqWait(Handle irq) { return syscall(SYS_IRQ_WAIT, irq); }
+
+// Each interrupt now arrives as an IrqMessage{cookie} on the peer of `endpoint`.
+inline long irqBind(Handle irq, Handle endpoint, unsigned long cookie) {
+    return syscall(SYS_IRQ_BIND, irq, endpoint, cookie);
+}
+
+inline long irqAck(Handle irq) { return syscall(SYS_IRQ_ACK, irq); }
 
 inline long portIn(Handle ports, unsigned short port) { return syscall(SYS_PORT_IN, ports, port); }
 

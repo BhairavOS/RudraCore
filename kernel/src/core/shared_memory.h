@@ -14,6 +14,7 @@ struct SharedMemory : public Object {
     u64 physical = 0;
     u64 size = 0; // page aligned
     bool owned = false;
+    bool isScreen = false; // the boot framebuffer: mapping it hands the screen to userspace
     Vmm::Cache cache = Vmm::Cache::WriteBack;
 
     SharedMemory() : Object(ObjectType::Memory) {}

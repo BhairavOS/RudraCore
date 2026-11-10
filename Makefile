@@ -14,20 +14,22 @@ ISOROOT := $(BUILD)/iso_root
 CXX := clang++
 LD  := ld.lld
 
-# Flags shared by the kernel and user programs. No SSE/x87 anywhere yet: the
-# kernel doesn't save floating-point registers on task switches.
+# Flags shared by the kernel and user programs.
 COMMON_FLAGS := \
 	--target=x86_64-unknown-none-elf -std=c++23 -O2 -g \
 	-Wall -Wextra -Werror \
 	-ffreestanding -fno-exceptions -fno-rtti -fno-threadsafe-statics \
 	-fno-stack-protector -fno-stack-check -fno-PIC \
-	-mno-80387 -mno-mmx -mno-sse -mno-sse2 \
 	-fno-omit-frame-pointer -Iabi -MMD -MP
 
+# The kernel never uses floating point or SSE: it doesn't save its own
+# FPU state, only user programs' (on task switches).
 CXXFLAGS := $(COMMON_FLAGS) -mcmodel=kernel -mno-red-zone \
+	-mno-80387 -mno-mmx -mno-sse -mno-sse2 \
 	-Ikernel/src -I$(BUILD) -isystem $(LIMINE_PROTO)
 
-USER_CXXFLAGS := $(COMMON_FLAGS) -Iuserspace/kapalaframe/include
+# User programs get SSE2 and floating point.
+USER_CXXFLAGS := $(COMMON_FLAGS) -msse2 -fno-math-errno -Iuserspace/kapalaframe/include
 
 ASFLAGS := --target=x86_64-unknown-none-elf
 
@@ -48,10 +50,10 @@ KAPALA_SRCS := $(shell find userspace/kapalaframe/src -name '*.cpp' -o -name '*.
 KAPALA_OBJS := $(patsubst %,$(BUILD)/%.o,$(KAPALA_SRCS))
 USER_PROGRAMS := $(notdir $(wildcard userspace/programs/*))
 USER_ELFS := $(USER_PROGRAMS:%=$(BUILD)/user/%.elf)
-USER_OBJS := $(KAPALA_OBJS) $(patsubst %,$(BUILD)/%.o,$(shell find userspace/programs -name '*.cpp'))
+USER_OBJS := $(KAPALA_OBJS) $(patsubst %,$(BUILD)/%.o,$(shell find userspace/programs -name '*.cpp' -o -name '*.S'))
 
 # Objects of one user program: $(call programObjs,init)
-programObjs = $(patsubst %,$(BUILD)/%.o,$(shell find userspace/programs/$(1) -name '*.cpp'))
+programObjs = $(patsubst %,$(BUILD)/%.o,$(shell find userspace/programs/$(1) -name '*.cpp' -o -name '*.S'))
 
 # Lets prerequisites use $$* (the pattern stem), for the program rule below.
 .SECONDEXPANSION:
@@ -132,7 +134,7 @@ $(BUILD)/userspace/%.cpp.o: userspace/%.cpp
 	@mkdir -p $(@D)
 	$(CXX) $(USER_CXXFLAGS) -c $< -o $@
 
-$(BUILD)/userspace/%.S.o: userspace/%.S
+$(BUILD)/userspace/%.S.o: userspace/%.S $(BUILD)/font.psf $(BUILD)/logo.rgba
 	@mkdir -p $(@D)
 	$(CXX) $(ASFLAGS) -c $< -o $@
 

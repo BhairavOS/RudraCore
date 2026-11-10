@@ -43,11 +43,22 @@ enum Syscall : unsigned long {
     // Memory
     SYS_MEMORY_CREATE = 20, // (usize size) -> Handle to new zeroed shared memory
     SYS_MEMORY_MAP = 21,    // (Handle memory) -> address where it's mapped (read + write)
+    SYS_MEMORY_ALLOC = 22,  // (usize size) -> address of new zeroed private memory (read + write)
 
     // Devices (drivers only: needs a handle given by init)
     SYS_IRQ_WAIT = 30,  // (Handle irq): waits for the interrupt to fire
     SYS_PORT_IN = 31,   // (Handle ports, u16 port) -> byte read
     SYS_PORT_OUT = 32,  // (Handle ports, u16 port, u8 value)
+    SYS_IRQ_BIND = 33,  // (Handle irq, Handle endpoint, u64 cookie)
+                        //   From now on each interrupt sends an IrqMessage{cookie} from
+                        //   `endpoint` (to its peer), so a driver can wait for several
+                        //   IRQs and other messages in one place. The line stays masked
+                        //   after each message until SYS_IRQ_ACK.
+    SYS_IRQ_ACK = 34,   // (Handle irq): done with the last interrupt, let the next one in
+};
+
+struct IrqMessage {
+    unsigned long cookie;
 };
 
 enum RecvFlags : unsigned long {
@@ -77,6 +88,7 @@ enum InitHandle : Handle {
     INIT_HANDLE_FRAMEBUFFER = 1, // shared memory: the screen
     INIT_HANDLE_PS2_PORTS = 2,   // I/O ports 0x60-0x64 (PS/2 controller)
     INIT_HANDLE_KEYBOARD_IRQ = 3,
+    INIT_HANDLE_MOUSE_IRQ = 4,
 };
 
 struct SystemInfo {

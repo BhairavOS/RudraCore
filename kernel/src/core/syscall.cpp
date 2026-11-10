@@ -8,6 +8,7 @@
 #include "core/sched.h"
 #include "core/shared_memory.h"
 #include "core/time.h"
+#include "display.h"
 #include "log.h"
 #include "mem/memory.h"
 #include "mem/pmm.h"
@@ -326,6 +327,43 @@ Arch::Frame* sysMemoryMap(Call const& c) {
     memory->ref();
     *slot = {memory, address, memory->size};
     c.task->nextMapAddress = address + memory->size + Mem::PAGE_SIZE; // gap between mappings
+
+    if (memory->isScreen)
+        Display::handOverToUserspace();
+    return c.result(static_cast<i64>(address));
+}
+
+// Private memory: fresh zeroed pages owned by the task's address space
+// (freed when the task ends). Pages needn't be physically contiguous.
+Arch::Frame* sysMemoryAlloc(Call const& c) {
+    constexpr u64 MAX_ALLOC = 256 * 1024 * 1024;
+    u64 size = Mem::alignUp(c.arg0(), Mem::PAGE_SIZE);
+    if (size == 0 or size > MAX_ALLOC)
+        return c.result(Abi::INVALID_ARGUMENT);
+
+    u64 address = c.task->nextMapAddress;
+    if (address + size > MAP_LIMIT)
+        return c.result(Abi::NO_SPACE);
+
+    auto& space = *c.task->space;
+    for (u64 offset = 0; offset < size; offset += Mem::PAGE_SIZE) {
+        u64 page = Pmm::allocZeroed();
+        if (not page or not space.map(address + offset, page, Mem::PAGE_SIZE,
+                                      Vmm::USER | Vmm::WRITE | Vmm::OWNED)) {
+            // Give back what was mapped so far.
+            if (page)
+                Pmm::free(page);
+            for (u64 undo = 0; undo < offset; undo += Mem::PAGE_SIZE) {
+                u64 physical;
+                if (space.translate(address + undo, physical))
+                    Pmm::free(physical);
+            }
+            space.unmap(address, offset);
+            return c.result(Abi::OUT_OF_MEMORY);
+        }
+    }
+
+    c.task->nextMapAddress = address + size + Mem::PAGE_SIZE;
     return c.result(static_cast<i64>(address));
 }
 
@@ -346,6 +384,28 @@ Arch::Frame* sysIrqWait(Call const& c) {
     irq->waiter = c.task;
     Arch::Pic::unmask(irq->line);
     return c.blockAndRetry();
+}
+
+Arch::Frame* sysIrqBind(Call const& c) {
+    i64 error = 0;
+    auto* irq = c.lookup<Core::Irq>(c.arg0(), ObjectType::Irq, error);
+    if (not irq)
+        return c.result(error);
+    auto* endpoint = c.lookup<Core::Endpoint>(c.arg1(), ObjectType::Channel, error);
+    if (not endpoint)
+        return c.result(error);
+
+    irq->bind(endpoint, c.arg2());
+    return c.result(Abi::OK);
+}
+
+Arch::Frame* sysIrqAck(Call const& c) {
+    i64 error = 0;
+    auto* irq = c.lookup<Core::Irq>(c.arg0(), ObjectType::Irq, error);
+    if (not irq)
+        return c.result(error);
+    irq->acknowledge();
+    return c.result(Abi::OK);
 }
 
 Arch::Frame* sysPortIn(Call const& c) {
@@ -407,10 +467,13 @@ Arch::Frame* dispatch(Arch::Frame* frame) {
 
     case Abi::SYS_MEMORY_CREATE: return sysMemoryCreate(c);
     case Abi::SYS_MEMORY_MAP: return sysMemoryMap(c);
+    case Abi::SYS_MEMORY_ALLOC: return sysMemoryAlloc(c);
 
     case Abi::SYS_IRQ_WAIT: return sysIrqWait(c);
     case Abi::SYS_PORT_IN: return sysPortIn(c);
     case Abi::SYS_PORT_OUT: return sysPortOut(c);
+    case Abi::SYS_IRQ_BIND: return sysIrqBind(c);
+    case Abi::SYS_IRQ_ACK: return sysIrqAck(c);
 
     default: return c.result(Abi::UNKNOWN_SYSCALL);
     }

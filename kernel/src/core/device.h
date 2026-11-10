@@ -5,17 +5,22 @@
 namespace Rudracore::Core {
 
 struct Task;
+struct Endpoint;
 
-// A hardware interrupt line delivered to a userspace driver.
+// A hardware interrupt line delivered to a userspace driver, either by
+// waking a task blocked in irq_wait, or as a message on a bound channel.
 //
-// When the IRQ fires, the kernel masks the line and wakes the driver. The
-// line stays masked while the driver services the device, and is unmasked
-// when the driver calls irq_wait again. So a driver is never interrupted by
-// its own device mid-work and can't miss an edge.
+// When the IRQ fires, the kernel masks the line before telling the driver.
+// It stays masked while the driver services the device, and is unmasked
+// when the driver waits again (irq_wait) or acknowledges (irq_ack). So a
+// driver is never interrupted by its own device mid-work, at most one
+// notification is ever in flight, and none are lost.
 struct Irq : public Object {
     u8 line;
-    bool pending = false;
-    Task* waiter = nullptr;
+    bool pending = false;     // fired, but not yet seen by the driver
+    Task* waiter = nullptr;   // a task blocked in irq_wait
+    Endpoint* bound = nullptr; // messages go out from here (holds a reference)
+    u64 cookie = 0;
 
     explicit Irq(u8 line);
     ~Irq() override;
@@ -23,6 +28,13 @@ struct Irq : public Object {
     // Called from the interrupt handler. Returns false if no driver owns
     // the line.
     static bool deliver(u8 line);
+
+    // Sends the notification message if the line is bound. Returns false
+    // if it couldn't be queued (it stays pending and is retried on ack).
+    bool notify();
+
+    void bind(Endpoint* endpoint, u64 cookie);
+    void acknowledge();
 };
 
 // A range of x86 I/O ports a driver may use.

@@ -1,3 +1,4 @@
+#include "arch/x86_64/fpu.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/io.h"
@@ -27,7 +28,7 @@ extern "C" void (*__init_array_end[])();
 
 namespace {
 
-constexpr char const* VERSION = "0.4.0";
+constexpr char const* VERSION = "0.6.0";
 
 void runGlobalConstructors() {
     for (auto* ctor = __init_array_start; ctor < __init_array_end; ctor++)
@@ -137,36 +138,28 @@ void clockTask(u64) {
     }
 }
 
-// Kernel task: spins without ever yielding for 2 seconds. Other tasks (the
-// clock, user programs) must keep running meanwhile: that's preemption.
-void busyTask(u64) {
-    u64 start = Time::now();
-    u64 loops = 0;
-    while (Time::now() - start < 2000)
-        loops++;
-    log("[busy] spun ", loops, " loops for 2 s without yielding; others kept running");
-}
-
 // Starts init, the root of userspace, and hands it the hardware: it decides
 // which driver gets what. The kernel itself never starts other programs.
 void startInit(Boot::Info const& info) {
-    Core::Object* handles[3] = {};
+    Core::Object* handles[4] = {};
 
     if (info.hasFramebuffer) {
         auto const& fb = info.framebuffer;
         u64 physical = reinterpret_cast<u64>(fb.address) - info.hhdmOffset;
-        handles[Abi::INIT_HANDLE_FRAMEBUFFER - 1] =
-            Core::SharedMemory::device(physical, fb.pitch * fb.height, Vmm::Cache::WriteCombining);
+        auto* screen = Core::SharedMemory::device(physical, fb.pitch * fb.height, Vmm::Cache::WriteCombining);
+        screen->isScreen = true;
+        handles[Abi::INIT_HANDLE_FRAMEBUFFER - 1] = screen;
     }
     handles[Abi::INIT_HANDLE_PS2_PORTS - 1] = new Core::IoPorts(0x60, 5); // 0x60-0x64
     handles[Abi::INIT_HANDLE_KEYBOARD_IRQ - 1] = new Core::Irq(1);
+    handles[Abi::INIT_HANDLE_MOUSE_IRQ - 1] = new Core::Irq(12);
 
     Abi::Error code;
     char const* error = nullptr;
-    Core::Task* init = Programs::start("init", 4, handles, 3, code, error);
+    Core::Task* init = Programs::start("init", 4, handles, 4, code, error);
     if (not init)
         panic("can't start init: is init.elf in the boot image?");
-    log("[core] started init as task ", init->id, " with the framebuffer, PS/2 ports and keyboard irq");
+    log("[core] started init as task ", init->id, " with the framebuffer, PS/2 ports, keyboard and mouse irqs");
 }
 
 } // namespace
@@ -192,7 +185,8 @@ extern "C" [[noreturn]] void kmain(u64 bootMagic, u64 bootInfo) {
     Arch::Gdt::init();
     Arch::Idt::init();
     Arch::Pic::init();
-    log("[cpu]  gdt + tss loaded, idt ready (256 vectors), pic remapped and masked");
+    Arch::Fpu::init();
+    log("[cpu]  gdt + tss loaded, idt ready (256 vectors), pic remapped and masked, sse on");
     testInterrupts();
 
     Pmm::init(info);
@@ -214,7 +208,6 @@ extern "C" [[noreturn]] void kmain(u64 bootMagic, u64 bootInfo) {
     Programs::init(info);
     Syscall::init(info);
     Sched::spawnKernel("clock", clockTask, 0);
-    Sched::spawnKernel("busy", busyTask, 0);
     startInit(info);
 
     log("[sched] starting: 1 ms timer, 10 ms time slices");

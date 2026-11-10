@@ -44,6 +44,10 @@ struct Task {
 
     Task* next = nullptr; // link in the ready, sleep or zombie list
 
+    // Floating point / SSE registers while the task isn't running (FXSAVE
+    // format, must be 16-byte aligned).
+    alignas(16) u8 fpuState[512];
+
     Object* handles[MAX_HANDLES] = {}; // slot 0 is never used
     Mapping mappings[MAX_MAPPINGS] = {};
     u64 nextMapAddress = MAP_BASE;

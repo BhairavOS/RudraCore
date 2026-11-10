@@ -16,6 +16,7 @@ constexpr Gfx::Color STATUS_BACKGROUND{0x0a, 0x06, 0x18};
 
 bool ready = false;
 bool panicking = false;
+bool userOwnsScreen = false;
 Gfx::Surface screen;
 Gfx::Font font;
 Gfx::Console console;
@@ -64,7 +65,7 @@ void init(Boot::Info const& info) {
 
 void drawStatus(u64 uptimeMs, u64 tasks, u64 freeBytes, u64 heapBytes) {
     Arch::InterruptGuard guard;
-    if (not ready or panicking)
+    if (not ready or panicking or userOwnsScreen)
         return;
 
     Line line;
@@ -86,10 +87,20 @@ void drawStatus(u64 uptimeMs, u64 tasks, u64 freeBytes, u64 heapBytes) {
                   line.text, Gfx::Palette::TEXT_DIM);
 }
 
+void handOverToUserspace() {
+    Arch::InterruptGuard guard;
+    if (userOwnsScreen)
+        return;
+    userOwnsScreen = true;
+    setLogMirror(nullptr);
+    log("[core] the screen now belongs to userspace; kernel logs continue on serial");
+}
+
 void showPanicScreen(char const* title) {
     if (not ready)
         return;
     panicking = true;
+    setLogMirror(mirrorToConsole); // the panic report goes on screen even if userspace had it
 
     screen.fillRect(0, 0, screen.width, screen.height, PANIC_BACKGROUND);
 

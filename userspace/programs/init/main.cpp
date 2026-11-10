@@ -4,8 +4,9 @@
 //   1: the framebuffer (shared memory)
 //   2: the PS/2 controller's I/O ports
 //   3: the keyboard interrupt
-// init decides who gets what: it starts each driver and service with just
-// the handles that program needs. Later it will start KamalShell🪷.
+//   4: the mouse interrupt
+// init decides who gets what: it starts each driver and program with just
+// the handles that program needs. In the next step it starts KamalShell🪷.
 
 #include <kapala/channel.h>
 #include <kapala/protocol/input.h>
@@ -15,84 +16,6 @@
 using namespace Kapala;
 
 namespace {
-
-// MARK: Screen
-
-struct Screen {
-    unsigned int* pixels = nullptr;
-    unsigned long width = 0, height = 0, stride = 0; // stride in pixels
-    unsigned char rShift = 16, gShift = 8, bShift = 0;
-
-    unsigned int pack(unsigned r, unsigned g, unsigned b) const {
-        return (r << rShift) | (g << gShift) | (b << bShift);
-    }
-
-    // Mixes a color into a pixel; alpha 0..255.
-    void blend(long x, long y, unsigned r, unsigned g, unsigned b, unsigned alpha) {
-        if (x < 0 or y < 0 or static_cast<unsigned long>(x) >= width or static_cast<unsigned long>(y) >= height)
-            return;
-        unsigned int& px = pixels[y * stride + x];
-        unsigned pr = (px >> rShift) & 0xFF, pg = (px >> gShift) & 0xFF, pb = (px >> bShift) & 0xFF;
-        px = pack((pr * (255 - alpha) + r * alpha) / 255,
-                  (pg * (255 - alpha) + g * alpha) / 255,
-                  (pb * (255 - alpha) + b * alpha) / 255);
-    }
-};
-
-struct Angle {
-    long sin, cos; // scaled by 1024
-};
-
-// One lotus petal leaning `a` from vertical, shaded from base color to a pale tip.
-void petal(Screen& s, long bx, long by, Angle a, long len, long wid, unsigned r, unsigned g, unsigned b) {
-    long cx = bx + a.sin * len / 1024, cy = by - a.cos * len / 1024;
-    for (long y = cy - len; y <= cy + len; y++) {
-        for (long x = cx - len; x <= cx + len; x++) {
-            long dx = x - cx, dy = y - cy;
-            long u = (dx * a.sin - dy * a.cos) / 1024;
-            long v = (dx * a.cos + dy * a.sin) / 1024;
-            long w2 = u > 0 ? wid * wid * (len - u) / len : wid * wid;
-            if (w2 <= 0 or u * u * w2 + v * v * len * len > len * len * w2)
-                continue;
-            unsigned t = static_cast<unsigned>((u + len) * 200 / (2 * len));
-            s.blend(x, y, (r * (255 - t) + 0xFF * t) / 255, (g * (255 - t) + 0xE0 * t) / 255,
-                    (b * (255 - t) + 0xEA * t) / 255, 225);
-        }
-    }
-}
-
-// The KamalShell🪷 emblem, drawn by userspace straight into the framebuffer.
-void drawLotus(Screen& s, long bx, long by, long size) {
-    petal(s, bx, by, {887, 512}, size * 7 / 10, size * 3 / 10, 0xC2, 0x18, 0x5B);
-    petal(s, bx, by, {-887, 512}, size * 7 / 10, size * 3 / 10, 0xC2, 0x18, 0x5B);
-    petal(s, bx, by, {512, 887}, size * 9 / 10, size * 33 / 100, 0xE7, 0x54, 0x80);
-    petal(s, bx, by, {-512, 887}, size * 9 / 10, size * 33 / 100, 0xE7, 0x54, 0x80);
-    petal(s, bx, by, {0, 1024}, size, size * 36 / 100, 0xFF, 0x8F, 0xAB);
-}
-
-void drawOnScreen() {
-    Sys::SystemInfo info;
-    Sys::systemInfo(info);
-    if (info.screenWidth == 0) {
-        Sys::log("no framebuffer, skipping the screen check");
-        return;
-    }
-
-    auto* pixels = static_cast<unsigned int*>(Sys::memoryMap(Sys::INIT_HANDLE_FRAMEBUFFER));
-    if (not pixels) {
-        Sys::log("can't map the framebuffer");
-        return;
-    }
-
-    Screen screen{pixels, info.screenWidth, info.screenHeight, info.screenPitch / 4,
-                  info.redShift, info.greenShift, info.blueShift};
-    drawLotus(screen, 110, 150, 56);
-
-    Text<> line;
-    line.add("drew the lotus (top left) from userspace: ").add(info.screenWidth).add("x")
-        .add(info.screenHeight).add(" framebuffer mapped via handle 1");
-    Sys::log(line.cstr());
-}
 
 // MARK: IPC check
 
@@ -151,37 +74,21 @@ void checkIpc() {
     Sys::log(reply.cstr());
 }
 
-// MARK: Keyboard
-
-[[noreturn]] void runKeyboard() {
-    Channel keys, driverEnd;
-    Channel::createPair(keys, driverEnd);
-
-    Sys::Handle give[] = {Sys::INIT_HANDLE_PS2_PORTS, Sys::INIT_HANDLE_KEYBOARD_IRQ, driverEnd.release()};
-    if (Sys::spawn("ps2-keyboard", give, 3) < 0) {
-        Sys::log("can't start the keyboard driver");
-        Sys::exit(1);
-    }
-
-    Sys::log("type something and press Enter");
+// Without a screen: echo typed lines to the log.
+[[noreturn]] void echoKeyboard(Channel& input) {
+    Sys::log("no screen: type something and press Enter");
     Text<128> line;
     for (;;) {
-        Protocol::KeyEvent event;
-        if (keys.recv(event) != Sys::OK) {
-            Sys::log("the keyboard driver stopped");
+        Protocol::InputEvent event;
+        if (input.recv(event) != Sys::OK)
             Sys::exit(1);
-        }
-        if (not event.pressed or event.character == 0)
+        if (event.type != Protocol::InputType::Key or not event.pressed or event.character == 0)
             continue;
-
         if (event.character == '\n') {
             Text<> echo;
             echo.add("you typed: ").add(line.cstr());
             Sys::log(echo.cstr());
             line = {};
-        } else if (event.character == '\b') {
-            if (line.length > 0)
-                line.data[--line.length] = '\0';
         } else {
             char text[2] = {event.character, 0};
             line.add(text);
@@ -196,8 +103,32 @@ int main() {
     hello.add("Bhairav OS userspace is up. I am init, task ").add(Sys::taskId());
     Sys::log(hello.cstr());
 
-    drawOnScreen();
     Sys::spawn("protect-test");
+    Sys::spawn("fpu-test"); // two at once: their floating-point
+    Sys::spawn("fpu-test"); // registers must not mix
     checkIpc();
-    runKeyboard();
+
+    // Input: the PS/2 driver gets the controller and both IRQs, and sends
+    // events to whoever holds the other end of `input`.
+    Channel input, driverEnd;
+    Channel::createPair(input, driverEnd);
+    Sys::Handle ps2[] = {Sys::INIT_HANDLE_PS2_PORTS, Sys::INIT_HANDLE_KEYBOARD_IRQ,
+                         Sys::INIT_HANDLE_MOUSE_IRQ, driverEnd.release()};
+    if (Sys::spawn("ps2", ps2, 4) < 0)
+        Sys::log("can't start the PS/2 driver");
+
+    Sys::SystemInfo info;
+    Sys::systemInfo(info);
+    if (info.screenWidth == 0)
+        echoKeyboard(input);
+
+    // Leave the boot screen up for a moment, then hand the screen and the
+    // input to the showcase app.
+    Sys::sleep(1500);
+    Sys::Handle app[] = {Sys::INIT_HANDLE_FRAMEBUFFER, input.release()};
+    if (Sys::spawn("showcase", app, 2) < 0)
+        Sys::log("can't start the showcase");
+
+    for (;;)
+        Sys::sleep(60 * 1000);
 }

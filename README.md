@@ -29,8 +29,9 @@ The compiler, assembler, ISO tools and QEMU all run inside a container.
 ```
 
 For a QEMU window on Windows: `winget install SoftwareFreedomConservancy.QEMU`.
-In the window, type a line and press Enter: the userspace keyboard driver
-sends each key to init, which echoes the line to the log.
+After the boot screen, the Kapalaframe showcase takes over: move the mouse,
+click "Say namaste", and type into the text field (Enter logs the line).
+Click inside the QEMU window to give it the mouse; Ctrl+Alt+G releases it.
 
 On Linux, install the packages listed in the `Dockerfile` and run `make`,
 `make run`, `make run-uefi` or `make shot` directly.
@@ -42,6 +43,7 @@ make shot PANIC_TEST=1                 # fault on purpose to check the panic scr
 make shot FIRMWARE=uefi WAIT=9         # boot through UEFI instead of BIOS
 MEMORY=4G make shot                    # boot with more RAM
 KEYS="h i ret" make shot               # type on the virtual keyboard after boot
+MONITOR="mouse_move 41 13; mouse_button 1; mouse_button 0" make shot   # use the mouse
 ```
 
 ## How it boots
@@ -74,12 +76,32 @@ numbers. Holding a handle is the permission to use the object:
 - **Channels** carry messages (up to 128 bytes, plus one handle) between programs.
 - **Shared memory** can be mapped by every program holding a handle to it.
 - **Device handles** (an IRQ line, a range of I/O ports) let a driver use
-  exactly the hardware it was given, nothing else.
+  exactly the hardware it was given, nothing else. An IRQ can be bound to a
+  channel, so a driver waits for several interrupts and messages in one place.
 
 At boot the kernel starts one program, **init**, and gives it handles to the
 hardware. init starts every other program with only the handles it needs:
-the PS/2 keyboard driver gets the keyboard's ports and IRQ, plus a channel
-back to init. System calls are listed in `abi/rudracore/syscalls.h`.
+the `ps2` driver gets the controller's ports and the keyboard and mouse IRQs
+plus a channel for input events; the `showcase` app gets the screen and the
+other end of that channel. When a program maps the screen, the kernel stops
+drawing on it (logs continue on serial; a panic still takes the screen back).
+System calls are listed in `abi/rudracore/syscalls.h`.
+
+Programs can use floating point and SSE: the kernel saves each task's FPU
+registers on every switch (the kernel itself is built without SSE).
+
+## Kapalaframe
+
+The library every program links against (`userspace/kapalaframe/`):
+
+| Header | What it gives |
+|---|---|
+| `kapala/sys.h` | System call wrappers |
+| `kapala/channel.h` | `Channel`: typed messages over channels |
+| `kapala/heap.h` | The heap behind `new` and `delete` |
+| `kapala/gfx.h` | `Bitmap`, `Color`, `Rect` and `Canvas`: clipped, anti-aliased rounded rectangles, circles, gradients, shadows, text and images, plus the Bhairav OS theme colors |
+| `kapala/text.h` | `Text`: build strings without the heap |
+| `kapala/protocol/input.h` | Keyboard and mouse events |
 
 ## Layout
 
@@ -102,8 +124,9 @@ back to init. System calls are listed in `abi/rudracore/syscalls.h`.
 | `boot/limine.conf` | Limine configuration, for legacy BIOS boot |
 | `legacy/` | Earlier sources, kept for reference, not built |
 
-Programs today: `init` (root of userspace), `ps2-keyboard` (driver),
-`ipc-test` and `protect-test` (checks run at every boot).
+Programs today: `init` (root of userspace), `ps2` (keyboard and mouse
+driver), `showcase` (the first Kapalaframe app), and `ipc-test`,
+`protect-test` and `fpu-test` (checks run at every boot).
 
 ## Roadmap
 
@@ -119,8 +142,9 @@ Bhairav OS is built from scratch, one working step at a time:
 5. **ShoolLoader🔱** ✅: own UEFI bootloader with its own boot protocol,
    config file, screen-mode selection and trident boot screen; Limine stays
    only for legacy BIOS
-6. **Kapalaframe + drivers**: the application framework, framebuffer and
-   mouse servers, floating point in user programs
+6. **Kapalaframe + drivers** ✅: floating point in programs, program heap,
+   IRQs as messages, PS/2 keyboard + mouse driver, Kapalaframe graphics,
+   and the showcase app
 7. **KamalShell🪷**: the compositor and graphical shell
 
 ## License

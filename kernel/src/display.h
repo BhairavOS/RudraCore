@@ -14,4 +14,8 @@ void showPanicScreen(char const* title);
 // Updates the status bar at the bottom of the boot screen.
 void drawStatus(u64 uptimeMs, u64 tasks, u64 freeBytes, u64 heapBytes);
 
+// A user program (the display server) took the screen: stop drawing on it.
+// Logs keep going to serial. Only a panic draws on the screen again.
+void handOverToUserspace();
+
 } // namespace Rudracore::Display

@@ -1,6 +1,7 @@
 #include "core/sched.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/fpu.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "core/time.h"
@@ -106,6 +107,7 @@ Task* newTask(char const* name) {
     t->id = nextId++;
     for (usize i = 0; name[i] and i + 1 < sizeof(t->name); i++)
         t->name[i] = name[i];
+    Arch::Fpu::initState(t->fpuState);
     t->stackPhysical = stack;
     t->stackTop = reinterpret_cast<u64>(Mem::toVirtual(stack)) + STACK_PAGES * Mem::PAGE_SIZE;
     return t;
@@ -146,6 +148,7 @@ void init() {
         idleTask->name[i] = name[i];
     idleTask->state = TaskState::Running;
     idleTask->stackTop = reinterpret_cast<u64>(kernelStackTop);
+    Arch::Fpu::initState(idleTask->fpuState);
     currentTask = idleTask;
     liveTasks = 1;
 }
@@ -239,6 +242,7 @@ void idle() {
 Arch::Frame* switchFrom(Arch::Frame* frame) {
     Task* prev = currentTask;
     prev->savedFrame = reinterpret_cast<u64>(frame);
+    Arch::Fpu::save(prev->fpuState);
 
     switch (prev->state) {
     case TaskState::Running:
@@ -272,6 +276,7 @@ Arch::Frame* switchFrom(Arch::Frame* frame) {
 
     // Interrupts from user mode must land on this task's kernel stack.
     Arch::Gdt::setKernelStack(next->stackTop);
+    Arch::Fpu::restore(next->fpuState);
 
     Vmm::Space const& space = next->space ? *next->space : Vmm::kernelSpace();
     if (Arch::readCr3() != space.root)
