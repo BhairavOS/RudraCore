@@ -13,6 +13,8 @@ void init();
 
 void unmask(u8 irq);
 
+void mask(u8 irq);
+
 void endOfInterrupt(u8 irq);
 
 // IRQ 7 and 15 can fire spuriously; those must not be acknowledged.

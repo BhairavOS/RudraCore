@@ -52,7 +52,7 @@ void init(Boot::Info const& info) {
 
     screen = Gfx::Surface::from(info.framebuffer);
     font = Gfx::Font::embedded();
-    Gfx::Rect area = Gfx::drawSplash(screen, font, "RudraCore microkernel");
+    Gfx::Rect area = Gfx::drawSplash(screen, font, "RudraCore - Efficient microkernel for Bhairav OS");
     if (not font.valid())
         return;
 

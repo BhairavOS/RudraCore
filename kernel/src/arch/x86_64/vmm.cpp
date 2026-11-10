@@ -220,6 +220,11 @@ void Space::unmap(u64 virt, u64 size) {
 }
 
 bool Space::translate(u64 virt, u64& phys) const {
+    bool writable;
+    return query(virt, phys, writable);
+}
+
+bool Space::query(u64 virt, u64& phys, bool& writable) const {
     u64* pml4 = table(root);
     u64* pdpt = nextTable(pml4, index(virt, 3), false, false);
     if (not pdpt)
@@ -233,6 +238,7 @@ bool Space::translate(u64 virt, u64& phys) const {
         return false;
     if (pde & HUGE) {
         phys = (pde & HUGE_ADDRESS_MASK) + (virt & (SIZE_2M - 1));
+        writable = pde & WRITABLE;
         return true;
     }
 
@@ -240,6 +246,7 @@ bool Space::translate(u64 virt, u64& phys) const {
     if (not(pte & PRESENT))
         return false;
     phys = (pte & ADDRESS_MASK) + (virt & (SIZE_4K - 1));
+    writable = pte & WRITABLE;
     return true;
 }
 
@@ -353,14 +360,15 @@ void destroyUserSpace(Space* space) {
     delete space;
 }
 
-bool isUserRange(Space const& space, u64 address, u64 length) {
+bool isUserRange(Space const& space, u64 address, u64 length, bool writable) {
     u64 end = address + length;
     if (end < address or end > USER_END)
         return false;
 
     for (u64 page = Mem::alignDown(address, SIZE_4K); page < end; page += SIZE_4K) {
         u64 phys;
-        if (not space.translate(page, phys))
+        bool pageWritable;
+        if (not space.query(page, phys, pageWritable) or (writable and not pageWritable))
             return false;
     }
     return true;

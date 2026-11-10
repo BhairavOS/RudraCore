@@ -4,8 +4,11 @@
 #include "arch/x86_64/pic.h"
 #include "boot.h"
 #include "config.h"
-#include "core/elf.h"
+#include "core/device.h"
+#include "core/programs.h"
 #include "core/sched.h"
+#include "core/shared_memory.h"
+#include "core/syscall.h"
 #include "core/time.h"
 #include "display.h"
 #include "log.h"
@@ -24,7 +27,7 @@ extern "C" void (*__init_array_end[])();
 
 namespace {
 
-constexpr char const* VERSION = "0.3.0";
+constexpr char const* VERSION = "0.4.0";
 
 void runGlobalConstructors() {
     for (auto* ctor = __init_array_start; ctor < __init_array_end; ctor++)
@@ -144,22 +147,26 @@ void busyTask(u64) {
     log("[busy] spun ", loops, " loops for 2 s without yielding; others kept running");
 }
 
-void startUserPrograms(Boot::Info const& info) {
-    for (usize i = 0; i < info.moduleCount; i++) {
-        auto const& module = info.modules[i];
-        Elf::Program program;
-        char const* error = nullptr;
-        if (not Elf::load(module.data, module.size, program, error)) {
-            log("[elf]  can't load ", module.name, ": ", error);
-            continue;
-        }
+// Starts init, the root of userspace, and hands it the hardware: it decides
+// which driver gets what. The kernel itself never starts other programs.
+void startInit(Boot::Info const& info) {
+    Core::Object* handles[3] = {};
 
-        auto* task = Sched::spawnUser(module.name, program.space, program.entry, program.stackTop);
-        if (task)
-            log("[elf]  started ", module.name, " as task ", task->id, " (entry ", Hex{program.entry}, ")");
-        else
-            log("[elf]  out of memory starting ", module.name);
+    if (info.hasFramebuffer) {
+        auto const& fb = info.framebuffer;
+        u64 physical = reinterpret_cast<u64>(fb.address) - info.hhdmOffset;
+        handles[Abi::INIT_HANDLE_FRAMEBUFFER - 1] =
+            Core::SharedMemory::device(physical, fb.pitch * fb.height, Vmm::Cache::WriteCombining);
     }
+    handles[Abi::INIT_HANDLE_PS2_PORTS - 1] = new Core::IoPorts(0x60, 5); // 0x60-0x64
+    handles[Abi::INIT_HANDLE_KEYBOARD_IRQ - 1] = new Core::Irq(1);
+
+    Abi::Error code;
+    char const* error = nullptr;
+    Core::Task* init = Programs::start("init", 4, handles, 3, code, error);
+    if (not init)
+        panic("can't start init: is init.elf in the boot image?");
+    log("[core] started init as task ", init->id, " with the framebuffer, PS/2 ports and keyboard irq");
 }
 
 } // namespace
@@ -176,7 +183,7 @@ extern "C" [[noreturn]] void kmain() {
     Mem::hhdmOffset = info.hhdmOffset;
 
     Display::init(info);
-    log("RudraCore ", VERSION, " - the BhairavOS microkernel");
+    log("RudraCore ", VERSION, " - Efficient microkernel for Bhairav OS");
     log("");
     logBootInfo(info);
 
@@ -202,9 +209,11 @@ extern "C" [[noreturn]] void kmain() {
 
     Time::init();
     Sched::init();
+    Programs::init(info);
+    Syscall::init(info);
     Sched::spawnKernel("clock", clockTask, 0);
     Sched::spawnKernel("busy", busyTask, 0);
-    startUserPrograms(info);
+    startInit(info);
 
     log("[sched] starting: 1 ms timer, 10 ms time slices");
     log("");

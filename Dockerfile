@@ -1,4 +1,4 @@
-# BhairavOS toolchain image: compiler, assembler, ISO tools, QEMU and Limine.
+# Bhairav OS toolchain image: compiler, assembler, ISO tools, QEMU and Limine.
 # Build:  docker build -t bhairav-toolchain .
 FROM ubuntu:24.04
 

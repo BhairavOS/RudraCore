@@ -1,4 +1,4 @@
-# BhairavOS developer helper for Windows. Everything builds inside Docker.
+# Bhairav OS developer helper for Windows. Everything builds inside Docker.
 #
 #   .\bhairav.ps1 toolchain   build the Docker toolchain image (first time only)
 #   .\bhairav.ps1 build       build the kernel and build\bhairavos.iso

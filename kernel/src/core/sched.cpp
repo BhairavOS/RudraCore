@@ -43,6 +43,13 @@ void enqueue(Task* t) {
     readyTail = t;
 }
 
+void enqueueFront(Task* t) {
+    t->next = readyHead;
+    readyHead = t;
+    if (not readyTail)
+        readyTail = t;
+}
+
 Task* dequeue() {
     Task* t = readyHead;
     if (t) {
@@ -69,8 +76,7 @@ void wakeSleepers(u64 now) {
 }
 
 void destroy(Task* t) {
-    if (t->space)
-        Vmm::destroyUserSpace(t->space);
+    t->releaseResources();
     if (t->stackPhysical)
         Pmm::free(t->stackPhysical, STACK_PAGES);
     delete t;
@@ -166,14 +172,22 @@ Task* spawnKernel(char const* name, void (*entry)(u64), u64 arg) {
     return t;
 }
 
-Task* spawnUser(char const* name, Vmm::Space* space, u64 entry, u64 stackTop) {
+Task* spawnUser(char const* name, Vmm::Space* space, u64 entry, u64 stackTop,
+                Core::Object* const* handles, usize handleCount) {
     Task* t = newTask(name);
     if (not t) {
         Vmm::destroyUserSpace(space);
+        for (usize i = 0; i < handleCount; i++) {
+            if (handles[i])
+                handles[i]->unref();
+        }
         return nullptr;
     }
 
     t->space = space;
+    for (usize i = 0; i < handleCount and i + 1 < Task::MAX_HANDLES; i++)
+        t->handles[i + 1] = handles[i];
+
     Arch::Frame* frame = initialFrame(t);
     frame->rip = entry;
     frame->rsp = stackTop;
@@ -241,6 +255,7 @@ Arch::Frame* switchFrom(Arch::Frame* frame) {
         zombies = prev;
         liveTasks--;
         break;
+    case TaskState::Blocked: // the object it waits on will wake it
     case TaskState::Ready:
         break;
     }
@@ -275,6 +290,23 @@ Arch::Frame* onTimerTick(Arch::Frame* frame) {
     if (currentTask == idleTask or now - sliceStart >= TIME_SLICE_MS)
         return switchFrom(frame);
     return frame;
+}
+
+// A task woken by a message or an interrupt runs next, ahead of tasks that
+// were preempted: it's waiting on something that just happened (a reply, a
+// key press), so running it right away keeps IPC fast and input responsive.
+void wake(Task* task) {
+    if (task->state != TaskState::Blocked)
+        return;
+    task->state = TaskState::Ready;
+    enqueueFront(task);
+}
+
+Arch::Frame* blockCurrent(Arch::Frame* frame) {
+    if (currentTask == idleTask)
+        panic("sched: the idle task can't block");
+    currentTask->state = TaskState::Blocked;
+    return switchFrom(frame);
 }
 
 Arch::Frame* sleepCurrent(Arch::Frame* frame, u64 milliseconds) {

@@ -4,6 +4,7 @@
 #include "arch/x86_64/frame.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/pic.h"
+#include "core/device.h"
 #include "core/sched.h"
 #include "core/syscall.h"
 #include "log.h"
@@ -178,6 +179,10 @@ extern "C" Frame* interruptDispatch(Frame* frame) {
         u8 irq = static_cast<u8>(vector - Idt::VECTOR_IRQ_BASE);
         if (Pic::isSpurious(irq))
             return frame;
+        if (Core::Irq::deliver(irq)) { // a userspace driver owns this line
+            Pic::endOfInterrupt(irq);
+            return frame;
+        }
         log("[irq]  unhandled irq ", irq);
         Pic::endOfInterrupt(irq);
         return frame;

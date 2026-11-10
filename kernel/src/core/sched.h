@@ -1,6 +1,7 @@
 #pragma once
 
 #include "arch/x86_64/frame.h"
+#include "core/object.h"
 #include "mem/vmm.h"
 
 namespace Rudracore::Core {
@@ -9,10 +10,22 @@ enum class TaskState : u8 {
     Ready,
     Running,
     Sleeping,
+    Blocked, // waiting on an object (channel, irq); the object holds the task
     Dead,
 };
 
+// Shared memory mapped into a task's address space.
+struct Mapping {
+    Object* object = nullptr; // holds a reference
+    u64 address = 0;
+    u64 size = 0;
+};
+
 struct Task {
+    static constexpr usize MAX_HANDLES = 64;
+    static constexpr usize MAX_MAPPINGS = 32;
+    static constexpr u64 MAP_BASE = 0x100000000; // shared memory goes from 4 GiB up
+
     u64 id = 0;
     char name[32] = {};
     TaskState state = TaskState::Ready;
@@ -31,7 +44,24 @@ struct Task {
 
     Task* next = nullptr; // link in the ready, sleep or zombie list
 
+    Object* handles[MAX_HANDLES] = {}; // slot 0 is never used
+    Mapping mappings[MAX_MAPPINGS] = {};
+    u64 nextMapAddress = MAP_BASE;
+
     bool isUser() const { return space != nullptr; }
+
+    // Takes over the caller's reference. Returns the handle, or 0 if full.
+    u64 addHandle(Object* object);
+
+    // The object behind a handle (no reference added), or nullptr if the
+    // handle isn't open.
+    Object* handle(u64 h) const;
+
+    // Removes the handle and returns its reference to the caller.
+    Object* takeHandle(u64 h);
+
+    // Drops every handle and mapping, and the address space.
+    void releaseResources();
 };
 
 } // namespace Rudracore::Core
@@ -49,8 +79,10 @@ void init();
 Core::Task* spawnKernel(char const* name, void (*entry)(u64), u64 arg);
 
 // The task starts at `entry` in user mode, with its stack at `stackTop`.
-// Takes ownership of `space`.
-Core::Task* spawnUser(char const* name, Vmm::Space* space, u64 entry, u64 stackTop);
+// Takes ownership of `space` and of the references in `handles`, which
+// become the task's handles 1, 2, 3... (nullptr entries leave a gap).
+Core::Task* spawnUser(char const* name, Vmm::Space* space, u64 entry, u64 stackTop,
+                      Core::Object* const* handles = nullptr, usize handleCount = 0);
 
 Core::Task* current();
 
@@ -64,11 +96,18 @@ void sleep(u64 milliseconds);
 // Run by the boot task once setup is done: enables interrupts and waits.
 [[noreturn]] void idle();
 
+// Makes a Blocked task runnable again. Interrupts must be disabled.
+void wake(Core::Task* task);
+
 // For interrupt handlers (interrupts disabled). Each returns the frame of
 // the task to resume, which may be a different task.
 Arch::Frame* onTimerTick(Arch::Frame* frame);
 Arch::Frame* switchFrom(Arch::Frame* frame);
 Arch::Frame* sleepCurrent(Arch::Frame* frame, u64 milliseconds);
 Arch::Frame* exitCurrent(Arch::Frame* frame, i64 code);
+
+// Blocks the current task until something calls wake() on it. The caller
+// must have registered the task with the object it waits on first.
+Arch::Frame* blockCurrent(Arch::Frame* frame);
 
 } // namespace Rudracore::Sched

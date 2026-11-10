@@ -1,6 +1,19 @@
 # RudraCore
 
-The microkernel of **BhairavOS** 🪷, written from scratch in C++23 for x86_64.
+**Efficient microkernel for Bhairav OS**, written from scratch in C++23 for x86_64.
+
+Bhairav OS is a completely new, independent operating system not based on
+Linux🐧, Unix, or Windows🪟. It is designed from the ground up with a unique
+kernel and architecture to provide a fresh approach to modern computing. This
+innovative OS focuses on creating a stable, efficient, and secure environment
+for both developers and end users.
+
+| Component | What it is |
+|---|---|
+| **ShoolLoader🔱** | Trident of System Awakening: the UEFI bootloader |
+| **RudraCore** | Efficient microkernel for Bhairav OS (this repository) |
+| **Kapalaframe** | Framework for efficient application development |
+| **KamalShell🪷** | Beautiful and Responsive Graphical Shell |
 
 ## Build and run (Windows)
 
@@ -8,13 +21,15 @@ You only need [Docker Desktop](https://www.docker.com/products/docker-desktop/).
 The compiler, assembler, ISO tools and QEMU all run inside a container.
 
 ```powershell
-.\bhairav.ps1 toolchain   # first time only: build the toolchain image
+.\bhairav.ps1 toolchain   # first time, and after Dockerfile changes: build the toolchain image
 .\bhairav.ps1 build       # builds build\bhairavos.iso
 .\bhairav.ps1 run         # boots it (opens a window if QEMU for Windows is installed)
 .\bhairav.ps1 shot        # boots headless, saves build\screen.png and build\serial.log
 ```
 
 For a QEMU window on Windows: `winget install SoftwareFreedomConservancy.QEMU`.
+In the window, type a line and press Enter: the userspace keyboard driver
+sends each key to init, which echoes the line to the log.
 
 On Linux, install the packages listed in the `Dockerfile` and run `make`,
 `make run`, `make run-uefi` or `make shot` directly.
@@ -22,10 +37,31 @@ On Linux, install the packages listed in the `Dockerfile` and run `make`,
 Testing options (inside `.\bhairav.ps1 shell`, or on Linux):
 
 ```sh
-make shot PANIC_TEST=1            # fault on purpose to check the panic screen
-make shot FIRMWARE=uefi WAIT=8    # boot through UEFI instead of BIOS
-MEMORY=4G make shot               # boot with more RAM
+make shot PANIC_TEST=1                 # fault on purpose to check the panic screen
+make shot FIRMWARE=uefi WAIT=9         # boot through UEFI instead of BIOS
+MEMORY=4G make shot                    # boot with more RAM
+KEYS="h i ret" make shot               # type on the virtual keyboard after boot
 ```
+
+## How it works
+
+RudraCore is a microkernel: the kernel only does what can't be done
+anywhere else (scheduling, memory protection, message passing, delivering
+interrupts). Drivers and services are ordinary user programs, each in its
+own address space, so a crashing driver can't take the system down.
+
+Programs reach kernel objects only through **handles**, private per-program
+numbers. Holding a handle is the permission to use the object:
+
+- **Channels** carry messages (up to 128 bytes, plus one handle) between programs.
+- **Shared memory** can be mapped by every program holding a handle to it.
+- **Device handles** (an IRQ line, a range of I/O ports) let a driver use
+  exactly the hardware it was given, nothing else.
+
+At boot the kernel starts one program, **init**, and gives it handles to the
+hardware. init starts every other program with only the handles it needs:
+the PS/2 keyboard driver gets the keyboard's ports and IRQ, plus a channel
+back to init. System calls are listed in `abi/rudracore/syscalls.h`.
 
 ## Layout
 
@@ -33,42 +69,43 @@ MEMORY=4G make shot               # boot with more RAM
 |---|---|
 | `kernel/src/main.cpp` | Kernel entry point (`kmain`) |
 | `kernel/src/boot.*` | Boot protocol glue: the only code that knows about the bootloader |
-| `kernel/src/arch/x86_64/` | CPU-specific code: entry, GDT, IDT, PIC, paging |
+| `kernel/src/arch/x86_64/` | CPU-specific code: entry, GDT, IDT, PIC, timer, paging |
 | `kernel/src/mem/` | Physical memory manager, kernel heap, virtual memory interface |
-| `kernel/src/core/` | Timer, scheduler, system calls, ELF program loader |
+| `kernel/src/core/` | Scheduler, system calls, handles, channels, shared memory, device objects, ELF loader |
 | `kernel/src/panic.*` | Panic screen and backtraces |
+| `kernel/src/gfx/` | Framebuffer drawing, font, log console, boot screen |
 | `abi/rudracore/` | The system call interface shared by kernel and userspace |
-| `userspace/kapalaframe/` | KapalaFrame: the runtime every BhairavOS program links against |
-| `userspace/programs/<name>/` | User programs, built to `<name>.elf` and loaded at boot |
+| `userspace/kapalaframe/` | Kapalaframe: the runtime and libraries every program uses |
+| `userspace/programs/<name>/` | Programs, built to `<name>.elf` and shipped in the boot image |
 | `assets/` | The Bhairav logo, converted at build time for the boot screen |
-| `kernel/src/gfx/` | Framebuffer drawing, font, log console, boot splash |
-| `kernel/src/log.*`, `serial.*` | Kernel logging to COM1 and the screen |
-| `kernel/linker.ld` | Kernel memory layout (higher half) |
-| `boot/limine.conf` | Boot menu configuration |
-| `legacy/` | Earlier skift-derived sources, kept for reference, not built |
+| `boot/limine.conf` | Boot configuration (until ShoolLoader🔱) |
+| `legacy/` | Earlier sources, kept for reference, not built |
+
+Programs today: `init` (root of userspace), `ps2-keyboard` (driver),
+`ipc-test` and `protect-test` (checks run at every boot).
 
 ## Roadmap
 
-BhairavOS is built from scratch, one working step at a time:
+Bhairav OS is built from scratch, one working step at a time:
 
-1. **Boot** ✅: boots on BIOS and UEFI, draws the splash screen, logs to screen and serial
-2. **CPU and memory** ✅: GDT/TSS, IDT with a panic screen for CPU exceptions,
-   bitmap physical memory manager, own 4-level page tables (no memory is both
-   writable and executable), bootloader memory reclaimed
-3. **Tasks and userspace** ✅: 1 ms timer, kernel heap, preemptive round-robin
-   scheduler, system calls, ELF loader, user programs in their own address
-   spaces (`init`, plus `protect-test`, which checks isolation at every boot)
-4. **IPC**: message passing, shared memory and IRQ forwarding, so drivers and
-   services run as user programs (what makes RudraCore a microkernel)
-5. **ShoolLoader** 🔱: own UEFI bootloader, replacing Limine
-6. **KapalaFrame + drivers**: the C++ framework, framebuffer and input servers
-7. **Kamala** 🪷: the compositor and graphical shell
+1. **Boot** ✅: boots on BIOS and UEFI, boot screen, logs to screen and serial
+2. **CPU and memory** ✅: GDT/TSS, IDT with a panic screen, physical memory
+   manager, own page tables (no memory both writable and executable)
+3. **Tasks and userspace** ✅: timer, kernel heap, preemptive scheduler,
+   system calls, ELF loader, isolated user programs
+4. **IPC** ✅: handles, channels, shared memory, IRQ and I/O port
+   capabilities, spawn; the keyboard driver runs in userspace
+5. **ShoolLoader🔱**: own UEFI bootloader, replacing Limine
+6. **Kapalaframe + drivers**: the application framework, framebuffer and
+   mouse servers, floating point in user programs
+7. **KamalShell🪷**: the compositor and graphical shell
 
-Until ShoolLoader is ready, the kernel boots through
+Until ShoolLoader🔱 is ready, the kernel boots through
 [Limine](https://github.com/limine-bootloader/limine) (BSD-2-Clause). All
 Limine-specific code is in `kernel/src/boot.cpp`, so switching bootloaders
 only touches that file.
 
 ## License
 
-GPL-3.0. See `LICENSE`.
+GPL-3.0. See `LICENSE`. The boot console font is Terminus (SIL Open Font
+License), embedded from the toolchain image.

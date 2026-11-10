@@ -43,6 +43,11 @@ void unmask(u8 irq) {
     outb(port, inb(port) & ~(1 << (irq % 8)));
 }
 
+void mask(u8 irq) {
+    u16 port = irq < 8 ? MASTER_DATA : SLAVE_DATA;
+    outb(port, inb(port) | (1 << (irq % 8)));
+}
+
 void endOfInterrupt(u8 irq) {
     if (irq >= 8)
         outb(SLAVE_CMD, CMD_EOI);

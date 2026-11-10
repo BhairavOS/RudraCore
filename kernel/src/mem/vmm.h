@@ -36,6 +36,9 @@ struct Space {
     // Looks up the physical address `virt` maps to. Returns false if unmapped.
     bool translate(u64 virt, u64& phys) const;
 
+    // Like translate(), also telling whether the page is writable.
+    bool query(u64 virt, u64& phys, bool& writable) const;
+
     void activate() const;
 };
 
@@ -53,8 +56,9 @@ Space* createUserSpace();
 // The space must not be active.
 void destroyUserSpace(Space* space);
 
-// True if [address, address + length) is in the user half and fully mapped.
-bool isUserRange(Space const& space, u64 address, u64 length);
+// True if [address, address + length) is in the user half and fully mapped
+// (and writable, if asked). Checked before the kernel touches user memory.
+bool isUserRange(Space const& space, u64 address, u64 length, bool writable = false);
 
 // Number of page-table pages allocated so far.
 u64 tablePages();

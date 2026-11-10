@@ -32,7 +32,7 @@ void drawLogo(Surface& s, i64 x, i64 y);
 // Draws a lotus whose petals grow upward from (baseX, baseY).
 void drawLotus(Surface& s, i64 baseX, i64 baseY, i64 size);
 
-// Draws the BhairavOS boot screen and returns the area left for the log console.
+// Draws the Bhairav OS boot screen and returns the area left for the log console.
 Rect drawSplash(Surface& s, Font const& font, char const* subtitle);
 
 } // namespace Rudracore::Gfx

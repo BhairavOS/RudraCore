@@ -1,4 +1,4 @@
-/* Layout for BhairavOS user programs. Each part starts on its own page so the
+/* Layout for Bhairav OS user programs. Each part starts on its own page so the
    kernel can give it its own permissions (code r-x, constants r--, data rw-). */
 
 OUTPUT_FORMAT(elf64-x86-64)

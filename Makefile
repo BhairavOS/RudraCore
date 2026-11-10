@@ -1,4 +1,4 @@
-# RudraCore / BhairavOS build. Runs inside the bhairav-toolchain Docker image
+# RudraCore / Bhairav OS build. Runs inside the bhairav-toolchain Docker image
 # (see Dockerfile and bhairav.ps1), or on any Linux with the same tools.
 
 LIMINE_DIR   ?= /opt/limine
@@ -42,7 +42,7 @@ CXX_SRCS := $(shell find kernel/src -name '*.cpp')
 ASM_SRCS := $(shell find kernel/src -name '*.S')
 OBJS := $(CXX_SRCS:%.cpp=$(BUILD)/%.o) $(ASM_SRCS:%.S=$(BUILD)/%.S.o)
 
-# Userspace: the KapalaFrame runtime, linked into every program in
+# Userspace: the Kapalaframe runtime, linked into every program in
 # userspace/programs/<name>/, which becomes build/user/<name>.elf.
 KAPALA_SRCS := $(shell find userspace/kapalaframe/src -name '*.cpp' -o -name '*.S')
 KAPALA_OBJS := $(patsubst %,$(BUILD)/%.o,$(KAPALA_SRCS))
@@ -55,6 +55,10 @@ programObjs = $(patsubst %,$(BUILD)/%.o,$(shell find userspace/programs/$(1) -na
 
 # Lets prerequisites use $$* (the pattern stem), for the program rule below.
 .SECONDEXPANSION:
+
+# Keep every object file: make would otherwise delete ones it considers
+# intermediate, and rebuild them every time.
+.SECONDARY:
 
 QEMU_FLAGS := -M q35 -m 256M -cdrom $(ISO) -boot d
 

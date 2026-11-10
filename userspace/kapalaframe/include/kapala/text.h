@@ -1,6 +1,6 @@
 #pragma once
 
-// KapalaFrame: a small fixed-capacity text builder (no heap needed).
+// Kapalaframe: a small fixed-capacity text builder (no heap needed).
 
 namespace Kapala {
 

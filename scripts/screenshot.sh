@@ -1,6 +1,11 @@
 #!/bin/sh
 # Boots the ISO in a headless QEMU, then saves a screenshot and the serial log.
 # Usage: screenshot.sh <iso> <out-dir> [uefi-firmware]
+#
+# Environment:
+#   WAIT=5        seconds to wait after boot
+#   MEMORY=256M   RAM size
+#   KEYS="h i ret"  QEMU key names to type after WAIT (tests the keyboard driver)
 set -eu
 
 ISO="$1"
@@ -8,6 +13,7 @@ OUT="$2"
 FIRMWARE="${3:-}"
 WAIT="${WAIT:-5}"
 MEMORY="${MEMORY:-256M}"
+KEYS="${KEYS:-}"
 
 rm -f "$OUT/screen.png" "$OUT/serial.log"
 
@@ -19,6 +25,11 @@ fi
 
 {
     sleep "$WAIT"
+    for key in $KEYS; do
+        echo "sendkey $key"
+        sleep 0.15
+    done
+    [ -n "$KEYS" ] && sleep 1
     echo "screendump $OUT/screen.png -f png"
     sleep 1
     echo "quit"

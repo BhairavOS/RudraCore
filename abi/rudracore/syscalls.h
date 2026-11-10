@@ -1,28 +1,95 @@
 #pragma once
 
 // The RudraCore system call interface, shared by the kernel and userspace
-// (KapalaFrame). Calling convention: `int $0x80` with the call number in rax
-// and arguments in rdi, rsi, rdx. The result comes back in rax: >= 0 on
-// success, a negative Error on failure. All other registers are preserved.
+// (Kapalaframe).
+//
+// Calling convention: `int $0x80` with the call number in rax and arguments
+// in rdi, rsi, rdx, r10, r8. The result comes back in rax: >= 0 on success,
+// a negative Error on failure. All other registers are preserved.
+//
+// Handles: programs reach kernel objects (channels, shared memory, devices)
+// only through handles, small per-program numbers like file descriptors.
+// A handle can be passed to another program in a channel message or when
+// spawning it; it then moves to that program. Handle 0 is never valid.
 
 namespace Rudracore::Abi {
 
 constexpr unsigned char SYSCALL_VECTOR = 0x80;
 
+using Handle = unsigned long;
+constexpr Handle NO_HANDLE = 0;
+
 enum Syscall : unsigned long {
+    // Tasks
     SYS_LOG = 0,     // (char const* text, usize length): write to the kernel log
     SYS_EXIT = 1,    // (long code): end the calling task
     SYS_YIELD = 2,   // (): let other tasks run
     SYS_SLEEP = 3,   // (u64 milliseconds)
     SYS_TASK_ID = 4, // () -> id of the calling task
     SYS_TIME = 5,    // () -> milliseconds since boot
+    SYS_SPAWN = 6,   // (char const* name, usize length, Handle const* handles, usize count) -> task id
+                     //   Starts a program from the boot image. The handles move to the new
+                     //   program, which finds them as handles 1, 2, 3...
+    SYS_SYSTEM_INFO = 7, // (SystemInfo* out)
+
+    // Handles and channels
+    SYS_HANDLE_CLOSE = 10,   // (Handle)
+    SYS_CHANNEL_CREATE = 11, // (Handle out[2]): two connected endpoints
+    SYS_CHANNEL_SEND = 12,   // (Handle endpoint, void const* data, usize length, Handle attach)
+                             //   Never blocks. `attach` (or NO_HANDLE) moves to the receiver.
+    SYS_CHANNEL_RECV = 13,   // (Handle endpoint, void* buffer, usize capacity, Handle* attached, u64 flags)
+                             //   -> message length. Waits for a message unless RECV_NONBLOCK.
+
+    // Memory
+    SYS_MEMORY_CREATE = 20, // (usize size) -> Handle to new zeroed shared memory
+    SYS_MEMORY_MAP = 21,    // (Handle memory) -> address where it's mapped (read + write)
+
+    // Devices (drivers only: needs a handle given by init)
+    SYS_IRQ_WAIT = 30,  // (Handle irq): waits for the interrupt to fire
+    SYS_PORT_IN = 31,   // (Handle ports, u16 port) -> byte read
+    SYS_PORT_OUT = 32,  // (Handle ports, u16 port, u8 value)
 };
+
+enum RecvFlags : unsigned long {
+    RECV_NONBLOCK = 1 << 0, // return WOULD_BLOCK instead of waiting
+};
+
+constexpr unsigned long MAX_MESSAGE_SIZE = 128;
 
 enum Error : long {
     OK = 0,
     UNKNOWN_SYSCALL = -1,
-    BAD_ADDRESS = -2,
+    BAD_ADDRESS = -2,      // a pointer argument isn't valid user memory
     INVALID_ARGUMENT = -3,
+    BAD_HANDLE = -4,       // not an open handle
+    WRONG_TYPE = -5,       // the handle refers to another kind of object
+    PEER_CLOSED = -6,      // the other end of the channel is gone
+    WOULD_BLOCK = -7,
+    QUEUE_FULL = -8,
+    NO_SPACE = -9,         // handle table or address space full
+    NOT_FOUND = -10,
+    BUFFER_TOO_SMALL = -11,
+    OUT_OF_MEMORY = -12,
+};
+
+// Handles init starts with (when the hardware exists).
+enum InitHandle : Handle {
+    INIT_HANDLE_FRAMEBUFFER = 1, // shared memory: the screen
+    INIT_HANDLE_PS2_PORTS = 2,   // I/O ports 0x60-0x64 (PS/2 controller)
+    INIT_HANDLE_KEYBOARD_IRQ = 3,
+};
+
+struct SystemInfo {
+    unsigned long uptimeMs;
+    unsigned long totalMemory;
+    unsigned long freeMemory;
+    unsigned long taskCount;
+
+    // Framebuffer (all zero if there's none). 32 bits per pixel.
+    unsigned long screenWidth;
+    unsigned long screenHeight;
+    unsigned long screenPitch; // bytes per row
+    unsigned char redShift, greenShift, blueShift, reserved;
 };
 
 } // namespace Rudracore::Abi

@@ -1,4 +1,4 @@
-/* KapalaFrame program entry point. The kernel starts every program here,
+/* Kapalaframe program entry point. The kernel starts every program here,
    in user mode, with a fresh stack. */
 
     .section .text
