@@ -5,7 +5,7 @@
 #include "space.h"
 #include "task.h"
 
-namespace Hjert::Core {
+namespace Rudracore::Core {
 
 Res<Arc<Task>> Task::create(
     Mode mode,
@@ -122,4 +122,4 @@ void Task::leave() {
         Arch::yield();
 }
 
-} // namespace Rudra::Core
+} // namespace Rudracore::Core

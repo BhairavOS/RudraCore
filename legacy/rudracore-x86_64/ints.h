@@ -39,4 +39,4 @@ extern "C" void _sysHandler();
 
 extern "C" uintptr_t _sysDispatch(uintptr_t rsp);
 
-} // namespace rudracore::Arch
+} // namespace Rudracore::Arch

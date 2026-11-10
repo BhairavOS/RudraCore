@@ -18,7 +18,7 @@
 
 #include "ints.h"
 
-namespace rudracore::Arch {
+namespace Rudracore::Arch {
 
 static x86_64::Com _com1 = x86_64::Com::com1();
 
@@ -173,7 +173,7 @@ void kPanic(Frame& frame) {
     logPrint("    {}", Cli::styled("Backtrace", Cli::WHITE));
     backtrace(frame.rbp);
     logPrint("");
-    logPrint("    {}", Cli::styled("System rudrated", Cli::WHITE));
+    logPrint("    {}", Cli::styled("System halted", Cli::WHITE));
     logPrint("");
     logPrint("{}", Cli::styled("-----------------------------------------------------------", Cli::YELLOW_LIGHT));
 
@@ -350,4 +350,4 @@ Res<Box<Core::Context>> createContext(Core::Mode mode, usize ip, usize sp, usize
     return Ok<Box<Core::Context>>(std::move(ctx));
 }
 
-} // namespace rudracore::Arch
+} // namespace Rudracore::Arch
