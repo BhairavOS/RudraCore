@@ -171,13 +171,15 @@ void startInit(Boot::Info const& info) {
 
 } // namespace
 
-extern "C" [[noreturn]] void kmain() {
+// Called from _start (start.S). With ShoolLoader, rdi/rsi carry the Shool
+// magic and boot info; with Limine they're meaningless (see Boot::collect).
+extern "C" [[noreturn]] void kmain(u64 bootMagic, u64 bootInfo) {
     Serial::init();
     runGlobalConstructors();
 
-    Boot::Info const& info = Boot::collect();
+    Boot::Info const& info = Boot::collect(bootMagic, bootInfo);
     if (not info.protocolSupported) {
-        log("rudracore: panic: the bootloader does not support Limine base revision 3");
+        log("rudracore: panic: unsupported bootloader (needs the Shool protocol v1 or Limine base revision 3)");
         Arch::halt();
     }
     Mem::hhdmOffset = info.hhdmOffset;

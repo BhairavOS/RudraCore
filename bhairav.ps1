@@ -4,6 +4,7 @@
 #   .\bhairav.ps1 build       build the kernel and build\bhairavos.iso
 #   .\bhairav.ps1 run         boot in a QEMU window (needs QEMU for Windows),
 #                             otherwise boot in Docker with the serial console
+#   .\bhairav.ps1 run-uefi    same, with UEFI firmware: boots through ShoolLoader
 #   .\bhairav.ps1 shot        boot headless, save build\screen.png + serial.log
 #   .\bhairav.ps1 clean       delete build\
 #   .\bhairav.ps1 shell       open a shell inside the toolchain container
@@ -40,21 +41,30 @@ switch ($Command) {
     "shot"      { Invoke-Toolchain @("make", "shot") }
     "clean"     { Invoke-Toolchain @("make", "clean") }
     "shell"     { Invoke-Toolchain @("bash") -Interactive }
-    "run" {
+    { $_ -in "run", "run-uefi" } {
+        $uefi = $Command -eq "run-uefi"
         Invoke-Toolchain @("make", "-j8")
         $qemu = Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue
-        if (-not $qemu) {
+        if ($qemu) { $qemu = $qemu.Source }
+        else {
             $default = "C:\Program Files\qemu\qemu-system-x86_64.exe"
             if (Test-Path $default) { $qemu = $default }
         }
         if ($qemu) {
-            & $qemu -M q35 -m 256M -cdrom "$Root\build\bhairavos.iso" -boot d -serial stdio
+            $qemuArgs = @("-M", "q35", "-m", "256M", "-cdrom", "$Root\build\bhairavos.iso", "-boot", "d", "-serial", "stdio")
+            if ($uefi) {
+                # QEMU for Windows ships UEFI firmware (EDK2) next to the program.
+                $firmware = Join-Path (Split-Path $qemu) "share\edk2-x86_64-code.fd"
+                if (-not (Test-Path $firmware)) { throw "UEFI firmware not found at $firmware" }
+                $qemuArgs += @("-drive", "if=pflash,format=raw,readonly=on,file=$firmware")
+            }
+            & $qemu @qemuArgs
         } else {
             Write-Host "QEMU for Windows not found, so booting in Docker with the serial console."
             Write-Host "To see the graphical screen: winget install SoftwareFreedomConservancy.QEMU"
             Write-Host "Quit with Ctrl+A then X."
-            Invoke-Toolchain @("make", "run") -Interactive
+            Invoke-Toolchain @("make", $(if ($uefi) { "run-uefi" } else { "run" })) -Interactive
         }
     }
-    default { throw "Unknown command '$Command'. Use: toolchain, build, run, shot, clean, shell" }
+    default { throw "Unknown command '$Command'. Use: toolchain, build, run, run-uefi, shot, clean, shell" }
 }

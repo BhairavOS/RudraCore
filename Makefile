@@ -60,14 +60,37 @@ programObjs = $(patsubst %,$(BUILD)/%.o,$(shell find userspace/programs/$(1) -na
 # intermediate, and rebuild them every time.
 .SECONDARY:
 
+# ShoolLoader🔱, the UEFI bootloader: a PE32+ UEFI application, so it's
+# built for the Windows x86_64 target (UEFI uses its calling convention and
+# file format) and linked with lld-link.
+SHOOL_SRCS := $(wildcard shoolloader/src/*.cpp)
+SHOOL_OBJS := $(SHOOL_SRCS:%.cpp=$(BUILD)/%.obj)
+SHOOL_EFI := $(BUILD)/shoolloader.efi
+SHOOL_CXXFLAGS := \
+	--target=x86_64-unknown-windows -std=c++23 -O2 \
+	-Wall -Wextra -Werror \
+	-ffreestanding -fshort-wchar -fno-exceptions -fno-rtti -fno-stack-protector \
+	-mno-red-zone -mno-stack-arg-probe -mno-80387 -mno-mmx -mno-sse -mno-sse2 \
+	-Iabi -MMD -MP
+
+# What goes on the boot media: stripped copies (the unstripped ELFs in
+# build/ keep their debug info for backtraces).
+BOOT_FILES := $(BUILD)/boot-files
+STRIPPED := $(BOOT_FILES)/rudracore.elf $(USER_PROGRAMS:%=$(BOOT_FILES)/%.elf)
+
+# The UEFI boot image: a FAT file system with ShoolLoader as the default
+# UEFI boot program, plus the kernel, programs and shool.cfg.
+EFI_IMG := $(BUILD)/efiboot.img
+
 QEMU_FLAGS := -M q35 -m 256M -cdrom $(ISO) -boot d
 
-.PHONY: all kernel user iso run run-uefi shot clean FORCE
+.PHONY: all kernel user shool iso run run-uefi shot clean FORCE
 
 all: iso
 
 kernel: $(KERNEL)
 user: $(USER_ELFS)
+shool: $(SHOOL_EFI)
 iso: $(ISO)
 
 $(BUILD)/font.psf: $(FONT)
@@ -117,18 +140,43 @@ $(BUILD)/user/%.elf: $(KAPALA_OBJS) userspace/link.ld $$(call programObjs,$$*)
 	@mkdir -p $(@D)
 	$(LD) $(USER_LDFLAGS) $(filter %.o,$^) -o $@
 
-$(ISO): $(KERNEL) $(USER_ELFS) boot/limine.conf
+# ShoolLoader objects
+$(BUILD)/shoolloader/%.obj: shoolloader/%.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(SHOOL_CXXFLAGS) -c $< -o $@
+
+$(SHOOL_EFI): $(SHOOL_OBJS)
+	lld-link /nologo /subsystem:efi_application /entry:efiMain /nodefaultlib /out:$@ $^
+
+$(BOOT_FILES)/rudracore.elf: $(KERNEL)
+	@mkdir -p $(@D)
+	llvm-strip -o $@ $<
+
+$(BOOT_FILES)/%.elf: $(BUILD)/user/%.elf
+	@mkdir -p $(@D)
+	llvm-strip -o $@ $<
+
+$(EFI_IMG): $(SHOOL_EFI) $(STRIPPED) boot/shool.cfg
+	rm -f $@
+	dd if=/dev/zero of=$@ bs=1M count=8 status=none
+	mformat -i $@ -T 16384 -h 64 -s 32 -v BHAIRAV ::
+	mmd -i $@ ::/EFI ::/EFI/BOOT ::/boot
+	mcopy -i $@ $(SHOOL_EFI) ::/EFI/BOOT/BOOTX64.EFI
+	mcopy -i $@ $(STRIPPED) boot/shool.cfg ::/boot/
+
+# One ISO for both firmware types:
+#   UEFI -> ShoolLoader🔱 (from the FAT boot image)
+#   BIOS -> Limine (ShoolLoader is UEFI-only), reading the ISO's /boot
+$(ISO): $(EFI_IMG) $(STRIPPED) boot/limine.conf
 	rm -rf $(ISOROOT)
-	mkdir -p $(ISOROOT)/boot/limine $(ISOROOT)/EFI/BOOT
-	cp $(KERNEL) $(USER_ELFS) $(ISOROOT)/boot/
+	mkdir -p $(ISOROOT)/boot/limine
+	cp $(STRIPPED) $(EFI_IMG) $(ISOROOT)/boot/
 	cp boot/limine.conf $(ISOROOT)/boot/limine/
-	cp $(LIMINE_DIR)/limine-bios.sys $(LIMINE_DIR)/limine-bios-cd.bin \
-	   $(LIMINE_DIR)/limine-uefi-cd.bin $(ISOROOT)/boot/limine/
-	cp $(LIMINE_DIR)/BOOTX64.EFI $(ISOROOT)/EFI/BOOT/
+	cp $(LIMINE_DIR)/limine-bios.sys $(LIMINE_DIR)/limine-bios-cd.bin $(ISOROOT)/boot/limine/
 	xorriso -as mkisofs -R -r -J -quiet \
 		-b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table \
 		-hfsplus -apm-block-size 2048 \
-		--efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
+		--efi-boot boot/efiboot.img -efi-boot-part --efi-boot-image \
 		--protective-msdos-label $(ISOROOT) -o $@
 	$(LIMINE_DIR)/limine bios-install $@ 2>/dev/null
 
@@ -147,4 +195,4 @@ shot: $(ISO)
 clean:
 	rm -rf $(BUILD)
 
--include $(OBJS:.o=.d) $(USER_OBJS:.o=.d)
+-include $(OBJS:.o=.d) $(USER_OBJS:.o=.d) $(SHOOL_OBJS:.obj=.d)

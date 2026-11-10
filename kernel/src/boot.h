@@ -70,6 +70,9 @@ struct Info {
     usize moduleCount;
 };
 
-Info const& collect();
+// Reads the boot information from whichever bootloader started the kernel.
+// ShoolLoader passes (Shool::MAGIC, BootInfo*) in rdi/rsi; anything else
+// means Limine, which answers the requests embedded in the kernel image.
+Info const& collect(u64 magic, u64 shoolInfo);
 
 } // namespace Rudracore::Boot

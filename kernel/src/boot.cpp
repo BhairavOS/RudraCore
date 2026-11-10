@@ -1,8 +1,11 @@
-// Limine boot protocol glue. This is the only file that knows about Limine.
+// Boot protocol glue: the only file that knows about bootloaders.
+// UEFI boots go through ShoolLoader🔱 (the Shool protocol); legacy BIOS
+// boots go through Limine.
 
 #include "boot.h"
 
 #include <limine.h>
+#include <shool/boot.h>
 
 namespace Rudracore::Boot {
 
@@ -117,8 +120,78 @@ char const* regionTypeName(RegionType type) {
     return "?";
 }
 
-Info const& collect() {
+namespace {
+
+RegionType regionTypeFromShool(u32 type) {
+    switch (type) {
+    case Shool::REGION_USABLE: return RegionType::Usable;
+    case Shool::REGION_ACPI_RECLAIMABLE: return RegionType::AcpiReclaimable;
+    case Shool::REGION_ACPI_NVS: return RegionType::AcpiNvs;
+    case Shool::REGION_BAD_MEMORY: return RegionType::BadMemory;
+    case Shool::REGION_LOADER_RECLAIMABLE: return RegionType::BootloaderReclaimable;
+    case Shool::REGION_KERNEL: return RegionType::Kernel;
+    case Shool::REGION_FRAMEBUFFER: return RegionType::Framebuffer;
+    default: return RegionType::Reserved;
+    }
+}
+
+void collectFromShool(Shool::BootInfo const& boot) {
+    info.protocolSupported = boot.version == Shool::VERSION and boot.size == sizeof(Shool::BootInfo);
+    if (not info.protocolSupported)
+        return;
+
+    copyString(info.loaderName, sizeof(info.loaderName), boot.loaderName);
+    copyString(info.loaderVersion, sizeof(info.loaderVersion), boot.loaderVersion);
+    info.hhdmOffset = boot.hhdmOffset;
+    info.kernelPhysicalBase = boot.kernelPhysical;
+    info.kernelVirtualBase = boot.kernelVirtual;
+
+    auto const& fb = boot.framebuffer;
+    if (fb.physical and fb.bpp == 32) {
+        info.hasFramebuffer = true;
+        info.framebuffer = {
+            .address = reinterpret_cast<u8*>(boot.hhdmOffset + fb.physical),
+            .width = fb.width,
+            .height = fb.height,
+            .pitch = fb.pitch,
+            .bpp = fb.bpp,
+            .redShift = fb.redShift,
+            .greenShift = fb.greenShift,
+            .blueShift = fb.blueShift,
+        };
+    }
+
+    for (u64 i = 0; i < boot.regionCount and i < Shool::BootInfo::MAX_REGIONS and
+                    info.regionCount < Info::MAX_REGIONS;
+         i++) {
+        auto const& r = boot.regions[i];
+        info.regions[info.regionCount++] = {r.base, r.length, regionTypeFromShool(r.type)};
+    }
+
+    for (u64 i = 0; i < boot.moduleCount and i < Shool::BootInfo::MAX_MODULES and
+                    info.moduleCount < Info::MAX_MODULES;
+         i++) {
+        auto const& m = boot.modules[i];
+        auto& module = info.modules[info.moduleCount++];
+        module.data = reinterpret_cast<u8 const*>(boot.hhdmOffset + m.physical);
+        module.size = m.size;
+        copyString(module.name, sizeof(module.name), m.name);
+    }
+}
+
+} // namespace
+
+Info const& collect(u64 magic, u64 shoolInfo) {
     info = {};
+
+    if (magic == Shool::MAGIC and shoolInfo) {
+        auto const* boot = reinterpret_cast<Shool::BootInfo const*>(shoolInfo);
+        if (boot->magic == Shool::MAGIC) {
+            collectFromShool(*boot);
+            return info;
+        }
+    }
+
     info.protocolSupported = LIMINE_BASE_REVISION_SUPPORTED(baseRevision);
     copyString(info.loaderName, sizeof(info.loaderName), "unknown");
     copyString(info.loaderVersion, sizeof(info.loaderVersion), "?");

@@ -11,6 +11,8 @@ kernelStackTop:
     .section .text
     .global _start
 _start:
+    /* rdi and rsi are left alone: they're kmain's arguments (the boot
+       protocol magic and info pointer from ShoolLoader). */
     leaq kernelStackTop(%rip), %rsp
     xorl %ebp, %ebp          /* end of the backtrace chain */
     call kmain
