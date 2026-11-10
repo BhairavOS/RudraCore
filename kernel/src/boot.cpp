@@ -45,20 +45,65 @@ volatile limine_memmap_request memmapRequest = {
     .response = nullptr,
 };
 
+[[gnu::used, gnu::section(".limine_requests")]]
+volatile limine_executable_address_request kernelAddressRequest = {
+    .id = LIMINE_EXECUTABLE_ADDRESS_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr,
+};
+
 [[gnu::used, gnu::section(".limine_requests_end")]]
 volatile u64 requestsEnd[] = LIMINE_REQUESTS_END_MARKER;
 
+Info info;
+
+void copyString(char* dest, usize size, char const* src) {
+    usize i = 0;
+    for (; src and src[i] and i + 1 < size; i++)
+        dest[i] = src[i];
+    dest[i] = '\0';
+}
+
+RegionType regionTypeFromLimine(u64 type) {
+    switch (type) {
+    case LIMINE_MEMMAP_USABLE: return RegionType::Usable;
+    case LIMINE_MEMMAP_ACPI_RECLAIMABLE: return RegionType::AcpiReclaimable;
+    case LIMINE_MEMMAP_ACPI_NVS: return RegionType::AcpiNvs;
+    case LIMINE_MEMMAP_BAD_MEMORY: return RegionType::BadMemory;
+    case LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE: return RegionType::BootloaderReclaimable;
+    case LIMINE_MEMMAP_EXECUTABLE_AND_MODULES: return RegionType::Kernel;
+    case LIMINE_MEMMAP_FRAMEBUFFER: return RegionType::Framebuffer;
+    case LIMINE_MEMMAP_RESERVED_MAPPED: return RegionType::ReservedMapped;
+    default: return RegionType::Reserved;
+    }
+}
+
 } // namespace
 
-Info collect() {
-    Info info{};
+char const* regionTypeName(RegionType type) {
+    switch (type) {
+    case RegionType::Usable: return "usable";
+    case RegionType::Reserved: return "reserved";
+    case RegionType::AcpiReclaimable: return "acpi-reclaimable";
+    case RegionType::AcpiNvs: return "acpi-nvs";
+    case RegionType::BadMemory: return "bad";
+    case RegionType::BootloaderReclaimable: return "bootloader";
+    case RegionType::Kernel: return "kernel";
+    case RegionType::Framebuffer: return "framebuffer";
+    case RegionType::ReservedMapped: return "reserved-mapped";
+    }
+    return "?";
+}
+
+Info const& collect() {
+    info = {};
     info.protocolSupported = LIMINE_BASE_REVISION_SUPPORTED(baseRevision);
-    info.loaderName = "unknown";
-    info.loaderVersion = "?";
+    copyString(info.loaderName, sizeof(info.loaderName), "unknown");
+    copyString(info.loaderVersion, sizeof(info.loaderVersion), "?");
 
     if (auto* res = loaderRequest.response) {
-        info.loaderName = res->name;
-        info.loaderVersion = res->version;
+        copyString(info.loaderName, sizeof(info.loaderName), res->name);
+        copyString(info.loaderVersion, sizeof(info.loaderVersion), res->version);
     }
 
     if (auto* res = framebufferRequest.response; res and res->framebuffer_count > 0) {
@@ -81,14 +126,19 @@ Info collect() {
     if (auto* res = hhdmRequest.response)
         info.hhdmOffset = res->offset;
 
+    if (auto* res = kernelAddressRequest.response) {
+        info.kernelPhysicalBase = res->physical_base;
+        info.kernelVirtualBase = res->virtual_base;
+    }
+
     if (auto* res = memmapRequest.response) {
-        info.memmapEntries = res->entry_count;
-        for (u64 i = 0; i < res->entry_count; i++) {
+        for (u64 i = 0; i < res->entry_count and info.regionCount < Info::MAX_REGIONS; i++) {
             auto* entry = res->entries[i];
-            if (entry->type == LIMINE_MEMMAP_USABLE)
-                info.usableMemory += entry->length;
-            else if (entry->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE)
-                info.reclaimableMemory += entry->length;
+            info.regions[info.regionCount++] = {
+                .base = entry->base,
+                .length = entry->length,
+                .type = regionTypeFromLimine(entry->type),
+            };
         }
     }
 

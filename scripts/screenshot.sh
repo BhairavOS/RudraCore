@@ -7,10 +7,11 @@ ISO="$1"
 OUT="$2"
 FIRMWARE="${3:-}"
 WAIT="${WAIT:-5}"
+MEMORY="${MEMORY:-256M}"
 
 rm -f "$OUT/screen.png" "$OUT/serial.log"
 
-set -- -M q35 -m 256M -cdrom "$ISO" -boot d \
+set -- -M q35 -m "$MEMORY" -cdrom "$ISO" -boot d \
     -display none -serial "file:$OUT/serial.log" -monitor stdio
 if [ -n "$FIRMWARE" ]; then
     set -- "$@" -bios "$FIRMWARE"

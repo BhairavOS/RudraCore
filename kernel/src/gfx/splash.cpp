@@ -65,7 +65,7 @@ Rect drawSplash(Surface& s, Font const& font, char const* subtitle) {
     s.verticalGradient(Palette::NIGHT, Palette::MAROON);
 
     i64 cx = s.width / 2;
-    i64 lotusSize = clamp<i64>(s.height / 7, 40, 160);
+    i64 lotusSize = clamp<i64>(s.height / 9, 40, 140);
     i64 lotusBase = s.height / 20 + lotusSize * 2;
     drawLotus(s, cx, lotusBase, lotusSize);
 

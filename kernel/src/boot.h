@@ -15,23 +15,48 @@ struct Framebuffer {
     u8 blueShift;
 };
 
-// Everything the kernel needs from the bootloader, in our own types, so the
-// rest of the kernel never depends on the boot protocol (Limine today,
-// ShoolLoader later).
+enum class RegionType : u8 {
+    Usable,
+    Reserved,
+    AcpiReclaimable,
+    AcpiNvs,
+    BadMemory,
+    BootloaderReclaimable, // bootloader page tables, stack and boot info
+    Kernel,                // the kernel image (and boot modules)
+    Framebuffer,
+    ReservedMapped,
+};
+
+char const* regionTypeName(RegionType type);
+
+struct Region {
+    u64 base;
+    u64 length;
+    RegionType type;
+};
+
+// Everything the kernel needs from the bootloader, copied into the kernel's
+// own memory. Once collected, nothing in the bootloader's memory is used
+// again, so it can be reclaimed. The rest of the kernel never depends on the
+// boot protocol (Limine today, ShoolLoader later).
 struct Info {
+    static constexpr usize MAX_REGIONS = 256;
+
     bool protocolSupported;
-    char const* loaderName;
-    char const* loaderVersion;
+    char loaderName[64];
+    char loaderVersion[64];
 
     bool hasFramebuffer;
     Framebuffer framebuffer;
 
-    u64 hhdmOffset;
-    u64 memmapEntries;
-    u64 usableMemory;
-    u64 reclaimableMemory;
+    u64 hhdmOffset; // virtual = physical + hhdmOffset
+    u64 kernelPhysicalBase;
+    u64 kernelVirtualBase;
+
+    Region regions[MAX_REGIONS];
+    usize regionCount;
 };
 
-Info collect();
+Info const& collect();
 
 } // namespace Rudracore::Boot

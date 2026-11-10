@@ -19,13 +19,23 @@ For a QEMU window on Windows: `winget install SoftwareFreedomConservancy.QEMU`.
 On Linux, install the packages listed in the `Dockerfile` and run `make`,
 `make run`, `make run-uefi` or `make shot` directly.
 
+Testing options (inside `.\bhairav.ps1 shell`, or on Linux):
+
+```sh
+make shot PANIC_TEST=1            # fault on purpose to check the panic screen
+make shot FIRMWARE=uefi WAIT=8    # boot through UEFI instead of BIOS
+MEMORY=4G make shot               # boot with more RAM
+```
+
 ## Layout
 
 | Path | What it is |
 |---|---|
 | `kernel/src/main.cpp` | Kernel entry point (`kmain`) |
 | `kernel/src/boot.*` | Boot protocol glue: the only code that knows about the bootloader |
-| `kernel/src/arch/x86_64/` | CPU-specific code |
+| `kernel/src/arch/x86_64/` | CPU-specific code: entry, GDT, IDT, PIC, paging |
+| `kernel/src/mem/` | Physical memory manager and the virtual memory interface |
+| `kernel/src/panic.*` | Panic screen and backtraces |
 | `kernel/src/gfx/` | Framebuffer drawing, font, log console, boot splash |
 | `kernel/src/log.*`, `serial.*` | Kernel logging to COM1 and the screen |
 | `kernel/linker.ld` | Kernel memory layout (higher half) |
@@ -37,7 +47,9 @@ On Linux, install the packages listed in the `Dockerfile` and run `make`,
 BhairavOS is built from scratch, one working step at a time:
 
 1. **Boot** ✅: boots on BIOS and UEFI, draws the splash screen, logs to screen and serial
-2. **CPU and memory**: GDT, IDT and exceptions, physical memory manager, paging
+2. **CPU and memory** ✅: GDT/TSS, IDT with a panic screen for CPU exceptions,
+   bitmap physical memory manager, own 4-level page tables (no memory is both
+   writable and executable), bootloader memory reclaimed
 3. **Tasks**: timer, scheduler, syscalls, first userspace program
 4. **ShoolLoader** 🔱: own UEFI bootloader, replacing Limine
 5. **KapalaFrame**: the C++ framework for BhairavOS applications

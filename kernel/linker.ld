@@ -1,7 +1,9 @@
-/* RudraCore kernel layout: loaded in the top 2 GiB of the address space. */
+/* RudraCore kernel layout: loaded in the top 2 GiB of the address space.
+   Each section starts on its own page so it can get its own permissions
+   (see mapKernelSection in arch/x86_64/vmm.cpp). */
 
 OUTPUT_FORMAT(elf64-x86-64)
-ENTRY(kmain)
+ENTRY(_start)
 
 PHDRS
 {
@@ -14,28 +16,36 @@ PHDRS
 SECTIONS
 {
     . = 0xffffffff80000000;
+    __kernel_start = .;
 
     .limine_requests : {
+        __requests_start = .;
         KEEP(*(.limine_requests_start))
         KEEP(*(.limine_requests))
         KEEP(*(.limine_requests_end))
+        __requests_end = .;
     } :limine_requests
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
     .text : {
+        __text_start = .;
         *(.text .text.*)
+        __text_end = .;
     } :text
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
     .rodata : {
+        __rodata_start = .;
         *(.rodata .rodata.*)
+        __rodata_end = .;
     } :rodata
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
     .data : {
+        __data_start = .;
         *(.data .data.*)
     } :data
 
@@ -49,7 +59,11 @@ SECTIONS
     .bss : {
         *(.bss .bss.*)
         *(COMMON)
+        . = ALIGN(CONSTANT(MAXPAGESIZE));
+        __data_end = .;
     } :data
+
+    __kernel_end = .;
 
     /DISCARD/ : {
         *(.eh_frame*)

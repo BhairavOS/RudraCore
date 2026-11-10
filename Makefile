@@ -20,7 +20,8 @@ CXXFLAGS := \
 	-ffreestanding -fno-exceptions -fno-rtti -fno-threadsafe-statics \
 	-fno-stack-protector -fno-stack-check -fno-PIC \
 	-mcmodel=kernel -mno-red-zone -mno-80387 -mno-mmx -mno-sse -mno-sse2 \
-	-Ikernel/src -isystem $(LIMINE_PROTO) \
+	-fno-omit-frame-pointer \
+	-Ikernel/src -I$(BUILD) -isystem $(LIMINE_PROTO) \
 	-MMD -MP
 
 ASFLAGS := --target=x86_64-unknown-none-elf
@@ -45,7 +46,18 @@ $(BUILD)/font.psf: $(FONT)
 	@mkdir -p $(@D)
 	cp $< $@
 
-$(BUILD)/%.o: %.cpp
+# Build options as a header. Only rewritten when an option changes, so only
+# the files that include it get rebuilt.
+#   PANIC_TEST=1  makes the kernel fault on purpose to show the panic screen.
+$(BUILD)/config.h: FORCE
+	@mkdir -p $(@D)
+	@echo '#define RUDRACORE_PANIC_TEST $(if $(PANIC_TEST),1,0)' > $@.tmp
+	@cmp -s $@.tmp $@ || mv $@.tmp $@
+	@rm -f $@.tmp
+
+FORCE:
+
+$(BUILD)/%.o: %.cpp | $(BUILD)/config.h
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
