@@ -1,5 +1,6 @@
 #include "mem/pmm.h"
 
+#include "arch/x86_64/cpu.h"
 #include "mem/memory.h"
 #include "panic.h"
 
@@ -100,6 +101,7 @@ void init(Boot::Info const& info) {
 }
 
 u64 alloc(usize count) {
+    Arch::InterruptGuard guard;
     if (count == 0 or count > freePages)
         return 0;
 
@@ -140,6 +142,7 @@ u64 allocZeroed(usize count) {
 }
 
 void free(u64 physical, usize count) {
+    Arch::InterruptGuard guard;
     if (physical % Mem::PAGE_SIZE != 0)
         panic("pmm: freeing a misaligned address");
 

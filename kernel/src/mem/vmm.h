@@ -10,7 +10,11 @@ enum Access : u32 {
     WRITE = 1 << 0,
     EXEC = 1 << 1,
     USER = 1 << 2,
+    OWNED = 1 << 3, // the physical pages belong to the space and are freed with it
 };
+
+// User address spaces use the lower half; the upper half is the kernel's.
+constexpr u64 USER_END = 0x0000800000000000;
 
 enum class Cache : u8 {
     WriteBack,      // normal RAM
@@ -40,6 +44,17 @@ struct Space {
 void init(Boot::Info const& info);
 
 Space& kernelSpace();
+
+// A new address space with an empty user half that shares the kernel half.
+// Returns nullptr when out of memory.
+Space* createUserSpace();
+
+// Frees the user half's page tables, every OWNED page, and the space itself.
+// The space must not be active.
+void destroyUserSpace(Space* space);
+
+// True if [address, address + length) is in the user half and fully mapped.
+bool isUserRange(Space const& space, u64 address, u64 length);
 
 // Number of page-table pages allocated so far.
 u64 tablePages();

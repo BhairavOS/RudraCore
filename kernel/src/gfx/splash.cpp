@@ -1,5 +1,8 @@
 #include "gfx/splash.h"
 
+extern "C" u8 const _logoStart[];
+extern "C" u8 const _logoEnd[];
+
 namespace Rudracore::Gfx {
 
 namespace {
@@ -61,27 +64,43 @@ void drawLotus(Surface& s, i64 baseX, i64 baseY, i64 size) {
     s.blendRect(baseX - lineW / 3, baseY + size / 8 + 9, lineW * 2 / 3, 3, Palette::SAFFRON, 140);
 }
 
+void drawLogo(Surface& s, i64 x, i64 y) {
+    constexpr usize EXPECTED_SIZE = LOGO_SIZE * LOGO_SIZE * 4;
+    if (static_cast<usize>(_logoEnd - _logoStart) != EXPECTED_SIZE)
+        return;
+
+    u8 const* px = _logoStart;
+    for (i64 ly = 0; ly < LOGO_SIZE; ly++) {
+        for (i64 lx = 0; lx < LOGO_SIZE; lx++, px += 4) {
+            u8 alpha = px[3];
+            if (alpha == 0)
+                continue;
+            Color c{px[0], px[1], px[2]};
+            if (alpha == 255)
+                s.plot(x + lx, y + ly, c);
+            else
+                s.blendPixel(x + lx, y + ly, c, alpha);
+        }
+    }
+}
+
 Rect drawSplash(Surface& s, Font const& font, char const* subtitle) {
     s.verticalGradient(Palette::NIGHT, Palette::MAROON);
 
     i64 cx = s.width / 2;
-    i64 lotusSize = clamp<i64>(s.height / 9, 40, 140);
-    i64 lotusBase = s.height / 20 + lotusSize * 2;
-    drawLotus(s, cx, lotusBase, lotusSize);
-
-    i64 y = lotusBase + lotusSize / 8 + 30;
+    i64 y = s.height / 40;
+    drawLogo(s, cx - LOGO_SIZE / 2, y);
+    y += LOGO_SIZE + 4;
 
     if (font.valid()) {
-        i64 titleScale = s.width >= 1024 ? 4 : 3;
-        drawCenteredText(s, font, cx, y, "BhairavOS", Palette::SAFFRON, titleScale);
-        y += font.height * titleScale + 8;
         drawCenteredText(s, font, cx, y, subtitle, Palette::TEXT_DIM, 1);
-        y += font.height + 24;
+        y += font.height + 16;
     }
 
-    // Log console panel with a saffron rule on top.
+    // Log console panel with a saffron rule on top, above the status bar.
     i64 margin = s.width / 10;
-    Rect panel{margin, y, s.width - 2 * margin, s.height - y - s.height / 20};
+    i64 bottom = s.height - STATUS_BAR_HEIGHT - 8;
+    Rect panel{margin, y, s.width - 2 * margin, bottom - y};
     s.fillRect(panel.x, panel.y - 2, panel.w, 2, Palette::SAFFRON);
     s.fillRect(panel.x, panel.y, panel.w, panel.h, Palette::PANEL);
 

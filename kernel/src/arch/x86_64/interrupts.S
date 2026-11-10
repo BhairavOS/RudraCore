@@ -42,6 +42,7 @@ interruptCommon:
 
     movq %rsp, %rdi
     call interruptDispatch
+    movq %rax, %rsp /* resume the frame returned: maybe another task's */
 
     popq %r15
     popq %r14

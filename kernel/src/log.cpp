@@ -23,6 +23,11 @@ void put(char const* str) {
         put(*str++);
 }
 
+void put(Str str) {
+    for (usize i = 0; i < str.length; i++)
+        put(str.data[i]);
+}
+
 void putUnsigned(u64 value) {
     char buf[21];
     usize i = sizeof(buf);

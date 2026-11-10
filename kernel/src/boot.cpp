@@ -52,6 +52,15 @@ volatile limine_executable_address_request kernelAddressRequest = {
     .response = nullptr,
 };
 
+[[gnu::used, gnu::section(".limine_requests")]]
+volatile limine_module_request moduleRequest = {
+    .id = LIMINE_MODULE_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr,
+    .internal_module_count = 0,
+    .internal_modules = nullptr,
+};
+
 [[gnu::used, gnu::section(".limine_requests_end")]]
 volatile u64 requestsEnd[] = LIMINE_REQUESTS_END_MARKER;
 
@@ -61,6 +70,19 @@ void copyString(char* dest, usize size, char const* src) {
     usize i = 0;
     for (; src and src[i] and i + 1 < size; i++)
         dest[i] = src[i];
+    dest[i] = '\0';
+}
+
+// "/boot/init.elf" -> "init"
+void moduleName(char* dest, usize size, char const* path) {
+    char const* start = path;
+    for (char const* p = path; p and *p; p++) {
+        if (*p == '/')
+            start = p + 1;
+    }
+    usize i = 0;
+    for (; start and start[i] and start[i] != '.' and i + 1 < size; i++)
+        dest[i] = start[i];
     dest[i] = '\0';
 }
 
@@ -139,6 +161,16 @@ Info const& collect() {
                 .length = entry->length,
                 .type = regionTypeFromLimine(entry->type),
             };
+        }
+    }
+
+    if (auto* res = moduleRequest.response) {
+        for (u64 i = 0; i < res->module_count and info.moduleCount < Info::MAX_MODULES; i++) {
+            auto* file = res->modules[i];
+            auto& module = info.modules[info.moduleCount++];
+            module.data = static_cast<u8 const*>(file->address);
+            module.size = file->size;
+            moduleName(module.name, sizeof(module.name), file->path);
         }
     }
 

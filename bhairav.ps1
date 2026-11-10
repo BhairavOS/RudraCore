@@ -14,20 +14,28 @@ $ErrorActionPreference = "Stop"
 $Image = "bhairav-toolchain"
 $Root = $PSScriptRoot
 
-function Invoke-Toolchain([string[]]$Arguments, [switch]$Interactive) {
-    $dockerArgs = @("run", "--rm")
-    if ($Interactive) { $dockerArgs += "-it" }
-    $dockerArgs += @("-v", "${Root}:/src", "-w", "/src", $Image) + $Arguments
-    # Tools print progress on stderr; only the exit code means failure.
+function Invoke-Docker([string[]]$Arguments) {
+    # Docker and the build tools print progress on stderr; only the exit code
+    # means failure (Windows PowerShell would otherwise stop on the first line).
     $ErrorActionPreference = "Continue"
-    & docker @dockerArgs 2>&1 | ForEach-Object {
+    & docker @Arguments 2>&1 | ForEach-Object {
         if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
     }
     if ($LASTEXITCODE -ne 0) { throw "docker exited with code $LASTEXITCODE" }
 }
 
+function Invoke-Toolchain([string[]]$Arguments, [switch]$Interactive) {
+    $dockerArgs = @("run", "--rm")
+    if ($Interactive) {
+        # Interactive sessions need a real terminal, so no output filtering.
+        & docker @($dockerArgs + @("-it", "-v", "${Root}:/src", "-w", "/src", $Image) + $Arguments)
+        return
+    }
+    Invoke-Docker ($dockerArgs + @("-v", "${Root}:/src", "-w", "/src", $Image) + $Arguments)
+}
+
 switch ($Command) {
-    "toolchain" { & docker build -t $Image $Root }
+    "toolchain" { Invoke-Docker @("build", "-t", $Image, $Root) }
     "build"     { Invoke-Toolchain @("make", "-j8") }
     "shot"      { Invoke-Toolchain @("make", "shot") }
     "clean"     { Invoke-Toolchain @("make", "clean") }

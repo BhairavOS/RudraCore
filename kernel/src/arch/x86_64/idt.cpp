@@ -4,8 +4,11 @@
 #include "arch/x86_64/frame.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/pic.h"
+#include "core/sched.h"
+#include "core/syscall.h"
 #include "log.h"
 #include "panic.h"
+#include "rudracore/syscalls.h"
 
 extern "C" u8 const interruptStubs[];
 
@@ -29,7 +32,8 @@ struct [[gnu::packed]] Pointer {
     u64 base;
 };
 
-constexpr u8 INTERRUPT_GATE = 0x8E; // present, ring 0, 64-bit interrupt gate
+constexpr u8 INTERRUPT_GATE = 0x8E;      // present, ring 0, 64-bit interrupt gate
+constexpr u8 USER_INTERRUPT_GATE = 0xEE; // same, but callable from ring 3
 
 constexpr u64 VECTOR_BREAKPOINT = 3;
 constexpr u64 VECTOR_PAGE_FAULT = 14;
@@ -101,6 +105,19 @@ void logRegisters(Frame const& f) {
     Panic::end();
 }
 
+// A user program faulted: report it and end that task. The kernel and the
+// other tasks keep running.
+void logUserFault(Frame const& f) {
+    auto* task = Sched::current();
+    log("[sched] ", task->name, " (task ", task->id, ") crashed: ", exceptionName(f.vector),
+        " at ", Hex{f.rip});
+    if (f.vector == VECTOR_PAGE_FAULT) {
+        log("[sched]   ", (f.error & 1) ? "protection violation" : "page not mapped", " on ",
+            (f.error & 16) ? "instruction fetch" : ((f.error & 2) ? "write" : "read"),
+            " of ", Hex{readCr2()});
+    }
+}
+
 } // namespace
 
 char const* exceptionName(u64 vector) {
@@ -115,7 +132,7 @@ void init() {
             .offsetLow = static_cast<u16>(handler),
             .selector = Gdt::KERNEL_CODE,
             .ist = i == 8 ? Gdt::IST_DOUBLE_FAULT : u8(0),
-            .attributes = INTERRUPT_GATE,
+            .attributes = i == Abi::SYSCALL_VECTOR ? USER_INTERRUPT_GATE : INTERRUPT_GATE,
             .offsetMid = static_cast<u16>(handler >> 16),
             .offsetHigh = static_cast<u32>(handler >> 32),
             .reserved = 0,
@@ -131,26 +148,47 @@ void init() {
 using namespace Rudracore;
 using namespace Rudracore::Arch;
 
-extern "C" void interruptDispatch(Frame* frame) {
+// Called by interruptCommon (interrupts.S) for every interrupt, with
+// interrupts disabled. Returns the frame to resume: the same one, or another
+// task's when the scheduler switches.
+extern "C" Frame* interruptDispatch(Frame* frame) {
     u64 vector = frame->vector;
+    bool fromUser = frame->cs & 3;
 
-    if (vector == Idt::VECTOR_BREAKPOINT) {
+    if (vector == Idt::VECTOR_BREAKPOINT and not fromUser) {
         // Not fatal: log and resume after the int3 instruction.
         log("[cpu]  breakpoint at ", Hex{frame->rip});
-        return;
+        return frame;
     }
 
-    if (vector < 32)
+    if (vector < 32) {
+        if (fromUser) {
+            Idt::logUserFault(*frame);
+            return Sched::exitCurrent(frame, -1);
+        }
         Idt::exceptionPanic(*frame);
+    }
 
-    if (vector >= Idt::VECTOR_IRQ_BASE and vector < Idt::VECTOR_IRQ_BASE + 16) {
+    if (vector == Idt::VECTOR_IRQ_BASE) { // timer
+        Pic::endOfInterrupt(0);
+        return Sched::onTimerTick(frame);
+    }
+
+    if (vector > Idt::VECTOR_IRQ_BASE and vector < Idt::VECTOR_IRQ_BASE + 16) {
         u8 irq = static_cast<u8>(vector - Idt::VECTOR_IRQ_BASE);
         if (Pic::isSpurious(irq))
-            return;
+            return frame;
         log("[irq]  unhandled irq ", irq);
         Pic::endOfInterrupt(irq);
-        return;
+        return frame;
     }
 
+    if (vector == Abi::SYSCALL_VECTOR)
+        return Syscall::dispatch(frame);
+
+    if (vector == Idt::YIELD_VECTOR and not fromUser)
+        return Sched::switchFrom(frame);
+
     log("[cpu]  unexpected interrupt vector ", vector);
+    return frame;
 }

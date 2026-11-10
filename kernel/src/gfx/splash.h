@@ -21,6 +21,14 @@ constexpr Color TEXT{0xe8, 0xe0, 0xf0};
 constexpr Color TEXT_DIM{0xa8, 0x9c, 0xc0};
 } // namespace Palette
 
+constexpr i64 LOGO_SIZE = 256;
+
+// Height of the status bar at the bottom of the boot screen.
+constexpr i64 STATUS_BAR_HEIGHT = 24;
+
+// Draws the embedded Bhairav logo with its top-left corner at (x, y).
+void drawLogo(Surface& s, i64 x, i64 y);
+
 // Draws a lotus whose petals grow upward from (baseX, baseY).
 void drawLotus(Surface& s, i64 baseX, i64 baseY, i64 size);
 

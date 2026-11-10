@@ -6,8 +6,8 @@
 //
 // A bitmap with one bit per page (1 = used) covers all RAM up to the highest
 // usable address. The bitmap itself is stored in the first usable region big
-// enough to hold it. Not thread-safe yet: the kernel is single-core with
-// interrupts off until step 3.
+// enough to hold it. Safe to call from any task: allocation runs with
+// interrupts disabled (single CPU).
 namespace Rudracore::Pmm {
 
 struct Stats {

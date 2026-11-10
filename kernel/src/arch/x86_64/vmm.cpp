@@ -26,6 +26,7 @@ constexpr u64 PCD = 1ull << 4;
 constexpr u64 HUGE = 1ull << 7;     // in a page-directory entry: 2 MiB page
 constexpr u64 PAT_4K = 1ull << 7;   // in a page-table entry
 constexpr u64 PAT_2M = 1ull << 12;  // in a 2 MiB page-directory entry
+constexpr u64 OWNED_PAGE = 1ull << 9; // software bit: free the page with its space
 constexpr u64 NO_EXECUTE = 1ull << 63;
 
 constexpr u64 ADDRESS_MASK = 0x000ffffffffff000;
@@ -79,6 +80,8 @@ u64 leafFlags(u32 access, Cache cache, bool huge) {
         flags |= WRITABLE;
     if (access & USER)
         flags |= USER_PAGE;
+    if (access & OWNED)
+        flags |= OWNED_PAGE;
     if (not(access & EXEC))
         flags |= NO_EXECUTE;
 
@@ -287,6 +290,80 @@ void init(Boot::Info const& info) {
 
 Space& kernelSpace() {
     return kernel;
+}
+
+Space* createUserSpace() {
+    u64 root = Pmm::allocZeroed();
+    if (not root)
+        return nullptr;
+    tablesAllocated++;
+
+    // Share the kernel half: the same 256 upper PML4 entries everywhere.
+    u64* pml4 = table(root);
+    u64* kernelPml4 = table(kernel.root);
+    for (usize i = 256; i < 512; i++)
+        pml4[i] = kernelPml4[i];
+
+    Space* space = new Space{};
+    space->root = root;
+    return space;
+}
+
+namespace {
+
+// Frees a user page table at `level` (2 = PDPT, 1 = PD, 0 = PT), everything
+// below it, and the OWNED pages it maps.
+void freeTable(u64 physical, int level) {
+    u64* tbl = table(physical);
+    for (usize i = 0; i < 512; i++) {
+        u64 entry = tbl[i];
+        if (not(entry & PRESENT))
+            continue;
+
+        bool isLeaf = level == 0 or (level == 1 and (entry & HUGE));
+        if (isLeaf) {
+            if (entry & OWNED_PAGE) {
+                u64 pages = level == 0 ? 1 : 512;
+                u64 mask = level == 0 ? ADDRESS_MASK : HUGE_ADDRESS_MASK;
+                Pmm::free(entry & mask, pages);
+            }
+        } else {
+            freeTable(entry & ADDRESS_MASK, level - 1);
+        }
+    }
+    Pmm::free(physical);
+    tablesAllocated--;
+}
+
+} // namespace
+
+void destroyUserSpace(Space* space) {
+    if (not space)
+        return;
+    if (Arch::readCr3() == space->root)
+        panic("vmm: destroying the active address space");
+
+    u64* pml4 = table(space->root);
+    for (usize i = 0; i < 256; i++) {
+        if (pml4[i] & PRESENT)
+            freeTable(pml4[i] & ADDRESS_MASK, 2);
+    }
+    Pmm::free(space->root);
+    tablesAllocated--;
+    delete space;
+}
+
+bool isUserRange(Space const& space, u64 address, u64 length) {
+    u64 end = address + length;
+    if (end < address or end > USER_END)
+        return false;
+
+    for (u64 page = Mem::alignDown(address, SIZE_4K); page < end; page += SIZE_4K) {
+        u64 phys;
+        if (not space.translate(page, phys))
+            return false;
+    }
+    return true;
 }
 
 u64 tablePages() {

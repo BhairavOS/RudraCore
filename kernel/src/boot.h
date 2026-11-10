@@ -35,12 +35,22 @@ struct Region {
     RegionType type;
 };
 
+// A file the bootloader loaded next to the kernel, such as the init program.
+// Its memory is a Kernel region, so it stays valid after boot memory is
+// reclaimed.
+struct Module {
+    u8 const* data;
+    u64 size;
+    char name[32]; // file name without directory or extension
+};
+
 // Everything the kernel needs from the bootloader, copied into the kernel's
 // own memory. Once collected, nothing in the bootloader's memory is used
 // again, so it can be reclaimed. The rest of the kernel never depends on the
 // boot protocol (Limine today, ShoolLoader later).
 struct Info {
     static constexpr usize MAX_REGIONS = 256;
+    static constexpr usize MAX_MODULES = 16;
 
     bool protocolSupported;
     char loaderName[64];
@@ -55,6 +65,9 @@ struct Info {
 
     Region regions[MAX_REGIONS];
     usize regionCount;
+
+    Module modules[MAX_MODULES];
+    usize moduleCount;
 };
 
 Info const& collect();

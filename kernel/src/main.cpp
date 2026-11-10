@@ -4,8 +4,12 @@
 #include "arch/x86_64/pic.h"
 #include "boot.h"
 #include "config.h"
+#include "core/elf.h"
+#include "core/sched.h"
+#include "core/time.h"
 #include "display.h"
 #include "log.h"
+#include "mem/heap.h"
 #include "mem/memory.h"
 #include "mem/pmm.h"
 #include "mem/vmm.h"
@@ -20,7 +24,7 @@ extern "C" void (*__init_array_end[])();
 
 namespace {
 
-constexpr char const* VERSION = "0.2.0";
+constexpr char const* VERSION = "0.3.0";
 
 void runGlobalConstructors() {
     for (auto* ctor = __init_array_start; ctor < __init_array_end; ctor++)
@@ -35,7 +39,7 @@ void logBootInfo(Boot::Info const& info) {
     } else {
         log("[boot] display     none (serial only)");
     }
-    log("[boot] kernel      phys ", Hex{info.kernelPhysicalBase}, " virt ", Hex{info.kernelVirtualBase});
+    log("[boot] modules     ", info.moduleCount);
 }
 
 void logMemory(char const* label) {
@@ -90,6 +94,74 @@ void testMemory() {
     log("[mem]  alloc / map / translate / unmap / free ok");
 }
 
+// Allocates objects of many sizes (small and multi-page), checks they don't
+// overlap, frees them, and checks the heap is back where it started.
+void testHeap() {
+    u64 before = Heap::stats().bytesInUse;
+
+    constexpr usize COUNT = 12;
+    u8* blocks[COUNT];
+    for (usize i = 0; i < COUNT; i++) {
+        usize size = 8u << i; // 8 bytes .. 16 KiB
+        blocks[i] = static_cast<u8*>(Heap::alloc(size));
+        if (not blocks[i])
+            panic("selftest: heap allocation failed");
+        for (usize j = 0; j < size; j++)
+            blocks[i][j] = static_cast<u8>(i);
+    }
+    for (usize i = 0; i < COUNT; i++) {
+        usize size = 8u << i;
+        for (usize j = 0; j < size; j++) {
+            if (blocks[i][j] != static_cast<u8>(i))
+                panic("selftest: heap blocks overlap");
+        }
+        Heap::free(blocks[i]);
+    }
+
+    if (Heap::stats().bytesInUse != before)
+        panic("selftest: heap accounting is off");
+    log("[heap] small and multi-page allocations ok");
+}
+
+// Kernel task: keeps the status bar up to date. Shows the scheduler and the
+// timer working: it runs every 250 ms no matter what else is going on.
+void clockTask(u64) {
+    for (;;) {
+        Display::drawStatus(Time::now(), Sched::taskCount(),
+                            Pmm::stats().freePages * Mem::PAGE_SIZE,
+                            Heap::stats().bytesInUse);
+        Sched::sleep(250);
+    }
+}
+
+// Kernel task: spins without ever yielding for 2 seconds. Other tasks (the
+// clock, user programs) must keep running meanwhile: that's preemption.
+void busyTask(u64) {
+    u64 start = Time::now();
+    u64 loops = 0;
+    while (Time::now() - start < 2000)
+        loops++;
+    log("[busy] spun ", loops, " loops for 2 s without yielding; others kept running");
+}
+
+void startUserPrograms(Boot::Info const& info) {
+    for (usize i = 0; i < info.moduleCount; i++) {
+        auto const& module = info.modules[i];
+        Elf::Program program;
+        char const* error = nullptr;
+        if (not Elf::load(module.data, module.size, program, error)) {
+            log("[elf]  can't load ", module.name, ": ", error);
+            continue;
+        }
+
+        auto* task = Sched::spawnUser(module.name, program.space, program.entry, program.stackTop);
+        if (task)
+            log("[elf]  started ", module.name, " as task ", task->id, " (entry ", Hex{program.entry}, ")");
+        else
+            log("[elf]  out of memory starting ", module.name);
+    }
+}
+
 } // namespace
 
 extern "C" [[noreturn]] void kmain() {
@@ -104,7 +176,7 @@ extern "C" [[noreturn]] void kmain() {
     Mem::hhdmOffset = info.hhdmOffset;
 
     Display::init(info);
-    log("RudraCore ", VERSION, " - the BhairavOS kernel");
+    log("RudraCore ", VERSION, " - the BhairavOS microkernel");
     log("");
     logBootInfo(info);
 
@@ -115,22 +187,26 @@ extern "C" [[noreturn]] void kmain() {
     testInterrupts();
 
     Pmm::init(info);
-    logMemory("after init  ");
-
     Vmm::init(info);
-    log("[vmm]  running on RudraCore's own page tables (", Vmm::tablePages(), " table pages)");
-
+    log("[vmm]  running on RudraCore's own page tables");
     Pmm::reclaimBootloaderMemory(info);
-    logMemory("reclaimed   ");
+    logMemory("");
 
     testMemory();
+    testHeap();
 
     if constexpr (RUDRACORE_PANIC_TEST) {
         log("[test] writing to an unmapped address on purpose...");
         *reinterpret_cast<u64 volatile*>(0xdead0000) = 1;
     }
 
+    Time::init();
+    Sched::init();
+    Sched::spawnKernel("clock", clockTask, 0);
+    Sched::spawnKernel("busy", busyTask, 0);
+    startUserPrograms(info);
+
+    log("[sched] starting: 1 ms timer, 10 ms time slices");
     log("");
-    log("[core] step 2 complete. next: timer, scheduler, syscalls.");
-    Arch::halt();
+    Sched::idle();
 }

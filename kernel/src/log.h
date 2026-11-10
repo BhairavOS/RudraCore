@@ -1,5 +1,6 @@
 #pragma once
 
+#include "arch/x86_64/cpu.h"
 #include "types.h"
 
 namespace Rudracore {
@@ -14,6 +15,12 @@ struct Bytes {
     u64 value;
 };
 
+// A string with an explicit length (not null-terminated).
+struct Str {
+    char const* data;
+    usize length;
+};
+
 using LogMirror = void (*)(char);
 
 // Everything logged goes to serial, and also to the mirror once one is set
@@ -22,6 +29,7 @@ void setLogMirror(LogMirror mirror);
 
 void put(char c);
 void put(char const* str);
+void put(Str str);
 void put(Hex hex);
 void put(Bytes bytes);
 void putUnsigned(u64 value);
@@ -38,8 +46,11 @@ void put(T value) {
 
 inline void put(bool value) { put(value ? "true" : "false"); }
 
+// Logs one line. The whole line is written with interrupts off, so lines
+// from different tasks never get mixed together.
 template <typename... Ts>
 void log(Ts... args) {
+    Arch::InterruptGuard guard;
     (put(args), ...);
     put('\n');
 }

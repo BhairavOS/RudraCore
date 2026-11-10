@@ -11,4 +11,7 @@ void init(Boot::Info const& info);
 // Repaints the whole screen as the panic screen and points the console at it.
 void showPanicScreen(char const* title);
 
+// Updates the status bar at the bottom of the boot screen.
+void drawStatus(u64 uptimeMs, u64 tasks, u64 freeBytes, u64 heapBytes);
+
 } // namespace Rudracore::Display
