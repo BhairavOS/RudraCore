@@ -60,6 +60,21 @@ enum Syscall : unsigned long {
                         //   IRQs and other messages in one place. The line stays masked
                         //   after each message until SYS_IRQ_ACK.
     SYS_IRQ_ACK = 34,   // (Handle irq): done with the last interrupt, let the next one in
+    SYS_DEVICE_INFO = 35, // (Handle device, DeviceInfo* out): what a PCI device is
+    SYS_DEVICE_BAR = 36,  // (Handle device, usize index) -> Handle to shared memory: the device's
+                          //   registers in memory BAR `index` (map it to use them, uncached).
+                          //   Also turns on the device's memory decoding and DMA.
+    SYS_DMA_ADDRESS = 37, // (Handle device, Handle memory) -> physical address of shared memory
+                          //   (from SYS_MEMORY_CREATE: physically contiguous), so the device can
+                          //   read and write it. Keep the memory handle open while the device
+                          //   uses it.
+};
+
+// A PCI device's identity (SYS_DEVICE_INFO).
+struct DeviceInfo {
+    unsigned short vendor, device;
+    unsigned char classCode, subclass, progIf, irqLine;
+    unsigned long barSize[6]; // 0: no memory BAR there
 };
 
 struct IrqMessage {
@@ -89,6 +104,13 @@ enum Error : long {
     BUFFER_TOO_SMALL = -11,
     OUT_OF_MEMORY = -12,
     TIMED_OUT = -13,
+
+    // Used by userspace servers (file system)
+    ALREADY_EXISTS = -14,
+    NOT_EMPTY = -15,    // a directory that still has entries
+    IO_ERROR = -16,     // the disk failed
+    IS_DIRECTORY = -17, // wanted a file
+    NOT_DIRECTORY = -18,
 };
 
 // Handles init starts with (when the hardware exists).
@@ -97,6 +119,7 @@ enum InitHandle : Handle {
     INIT_HANDLE_PS2_PORTS = 2,   // I/O ports 0x60-0x64 (PS/2 controller)
     INIT_HANDLE_KEYBOARD_IRQ = 3,
     INIT_HANDLE_MOUSE_IRQ = 4,
+    INIT_HANDLE_STORAGE = 5,     // PCI device: the AHCI (SATA) disk controller
 };
 
 struct SystemInfo {
@@ -112,6 +135,7 @@ struct SystemInfo {
     unsigned char redShift, greenShift, blueShift, reserved;
 
     unsigned long timeOfDay; // seconds since midnight, from the hardware clock (UTC)
+    unsigned long unixTime;  // seconds since 1970-01-01 (UTC)
 };
 
 } // namespace Rudracore::Abi

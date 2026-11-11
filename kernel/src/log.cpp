@@ -51,7 +51,7 @@ void putSigned(i64 value) {
 void put(Hex hex) {
     static constexpr char DIGITS[] = "0123456789abcdef";
     put("0x");
-    for (int shift = 60; shift >= 0; shift -= 4)
+    for (int shift = (hex.digits - 1) * 4; shift >= 0; shift -= 4)
         put(DIGITS[(hex.value >> shift) & 0xF]);
 }
 

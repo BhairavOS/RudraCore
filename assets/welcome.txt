@@ -1,0 +1,4 @@
+Namaste! This is the Bhairav OS disk.
+
+It's a FAT32 volume, so Windows, Linux and macOS can open it too.
+Notes keeps its text in /notes.txt here.

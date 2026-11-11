@@ -9,18 +9,22 @@ namespace Rudracore::Time {
 namespace {
 
 u64 ticks = 0;
-u64 bootTimeOfDay = 0;
+u64 bootUnixTime = 0;
 
 } // namespace
 
 void init() {
-    bootTimeOfDay = Arch::Rtc::secondsOfDay();
+    bootUnixTime = Arch::Rtc::unixTime();
     Arch::Pit::init(TICKS_PER_SECOND);
     Arch::Pic::unmask(0);
 }
 
+u64 unixTime() {
+    return bootUnixTime + now() / 1000;
+}
+
 u64 timeOfDay() {
-    return (bootTimeOfDay + now() / 1000) % (24 * 60 * 60);
+    return unixTime() % (24 * 60 * 60);
 }
 
 void tick() {

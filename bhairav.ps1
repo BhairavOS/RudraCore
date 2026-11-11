@@ -1,7 +1,8 @@
 # Bhairav OS developer helper for Windows. Everything builds inside Docker.
 #
 #   .\bhairav.ps1 toolchain   build the Docker toolchain image (first time only)
-#   .\bhairav.ps1 build       build the kernel and build\bhairavos.iso
+#   .\bhairav.ps1 build       build the kernel and build\bhairavos.iso (and disk.img,
+#                             the FAT32 disk Bhairav OS saves files on, the first time)
 #   .\bhairav.ps1 run         boot in a QEMU window (needs QEMU for Windows),
 #                             otherwise boot in Docker with the serial console
 #   .\bhairav.ps1 run-uefi    same, with UEFI firmware: boots through ShoolLoader
@@ -51,7 +52,8 @@ switch ($Command) {
             if (Test-Path $default) { $qemu = $default }
         }
         if ($qemu) {
-            $qemuArgs = @("-M", "q35", "-m", "256M", "-cdrom", "$Root\build\bhairavos.iso", "-boot", "d", "-serial", "stdio")
+            $qemuArgs = @("-M", "q35", "-m", "256M", "-cdrom", "$Root\build\bhairavos.iso", "-boot", "d", "-serial", "stdio",
+                          "-drive", "file=$Root\disk.img,format=raw,if=none,id=disk", "-device", "ide-hd,drive=disk,bus=ide.0")
             if ($uefi) {
                 # QEMU for Windows ships UEFI firmware (EDK2) next to the program.
                 $firmware = Join-Path (Split-Path $qemu) "share\edk2-x86_64-code.fd"

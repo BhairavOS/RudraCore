@@ -5,10 +5,12 @@
 //   2: the PS/2 controller's I/O ports
 //   3: the keyboard interrupt
 //   4: the mouse interrupt
+//   5: the disk controller (AHCI), if there is one
 // init decides who gets what: it starts each driver and program with just
 // the handles that program needs, and finally KamalShell🪷.
 
 #include <kapala/channel.h>
+#include <kapala/protocol/fs.h>
 #include <kapala/protocol/input.h>
 #include <kapala/sys.h>
 #include <kapala/text.h>
@@ -74,6 +76,37 @@ void checkIpc() {
     Sys::log(reply.cstr());
 }
 
+// Storage: ahci drives the disk, and fs serves files from it. Returns the
+// channel that connects new clients to fs.
+Channel startStorage() {
+    Channel diskClient, diskDriver;
+    Channel::createPair(diskClient, diskDriver);
+    Sys::Handle ahci[] = {Sys::INIT_HANDLE_STORAGE, diskDriver.handle()};
+    if (Sys::spawn("ahci", ahci, 2) >= 0)
+        diskDriver.release(); // moved to the driver
+    else
+        Sys::log("no disk controller: files are unavailable");
+    diskDriver = Channel(); // without a driver fs sees the channel closed
+
+    Channel connect, fsEnd;
+    Channel::createPair(connect, fsEnd);
+    Sys::Handle fs[] = {diskClient.release(), fsEnd.release()};
+    if (Sys::spawn("fs", fs, 2) < 0)
+        Sys::log("can't start the file system server");
+    return connect;
+}
+
+// Gives `program` a new fs connection as its handle 1.
+void spawnWithFiles(char const* program, Channel& connect) {
+    Channel mine, theirs;
+    Channel::createPair(mine, theirs);
+    if (connect.send(Protocol::Fs::Connect{Protocol::Fs::CONNECT_MAGIC}, theirs.handle()) == Sys::OK)
+        theirs.release();
+    Sys::Handle give[] = {mine.handle()};
+    if (Sys::spawn(program, give, 1) >= 0)
+        mine.release();
+}
+
 // Without a screen: echo typed lines to the log.
 [[noreturn]] void echoKeyboard(Channel& input) {
     Sys::log("no screen: type something and press Enter");
@@ -108,6 +141,9 @@ int main() {
     Sys::spawn("fpu-test"); // registers must not mix
     checkIpc();
 
+    Channel files = startStorage();
+    spawnWithFiles("fs-test", files);
+
     // Input: the PS/2 driver gets the controller and both IRQs, and sends
     // events to whoever holds the other end of `input`.
     Channel input, driverEnd;
@@ -122,11 +158,11 @@ int main() {
     if (info.screenWidth == 0)
         echoKeyboard(input);
 
-    // Leave the boot screen up for a moment, then hand the screen and the
-    // input to KamalShell, which starts the apps.
+    // Leave the boot screen up for a moment, then hand the screen, the
+    // input and file access to KamalShell, which starts the apps.
     Sys::sleep(1500);
-    Sys::Handle shell[] = {Sys::INIT_HANDLE_FRAMEBUFFER, input.release()};
-    if (Sys::spawn("kamalshell", shell, 2) < 0)
+    Sys::Handle shell[] = {Sys::INIT_HANDLE_FRAMEBUFFER, input.release(), files.release()};
+    if (Sys::spawn("kamalshell", shell, 3) < 0)
         Sys::log("can't start KamalShell");
 
     for (;;)

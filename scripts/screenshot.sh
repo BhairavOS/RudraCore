@@ -1,6 +1,6 @@
 #!/bin/sh
 # Boots the ISO in a headless QEMU, then saves a screenshot and the serial log.
-# Usage: screenshot.sh <iso> <out-dir> [uefi-firmware]
+# Usage: screenshot.sh <iso> <out-dir> <disk-image> [uefi-firmware]
 #
 # Environment:
 #   WAIT=5        seconds to wait after boot
@@ -12,7 +12,8 @@ set -eu
 
 ISO="$1"
 OUT="$2"
-FIRMWARE="${3:-}"
+DISK="$3"
+FIRMWARE="${4:-}"
 WAIT="${WAIT:-5}"
 MEMORY="${MEMORY:-256M}"
 KEYS="${KEYS:-}"
@@ -21,6 +22,7 @@ MONITOR="${MONITOR:-}"
 rm -f "$OUT/screen.png" "$OUT/serial.log"
 
 set -- -M q35 -m "$MEMORY" -cdrom "$ISO" -boot d \
+    -drive "file=$DISK,format=raw,if=none,id=disk" -device ide-hd,drive=disk,bus=ide.0 \
     -display none -serial "file:$OUT/serial.log" -monitor stdio
 if [ -n "$FIRMWARE" ]; then
     set -- "$@" -bios "$FIRMWARE"

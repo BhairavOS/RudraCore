@@ -9,6 +9,7 @@ enum class ObjectType : u8 {
     Memory,
     Irq,
     IoPorts,
+    PciDevice,
 };
 
 // Base of everything a handle can refer to. Reference counted: each handle,

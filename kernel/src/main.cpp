@@ -141,7 +141,7 @@ void clockTask(u64) {
 // Starts init, the root of userspace, and hands it the hardware: it decides
 // which driver gets what. The kernel itself never starts other programs.
 void startInit(Boot::Info const& info) {
-    Core::Object* handles[4] = {};
+    Core::Object* handles[5] = {};
 
     if (info.hasFramebuffer) {
         auto const& fb = info.framebuffer;
@@ -154,12 +154,23 @@ void startInit(Boot::Info const& info) {
     handles[Abi::INIT_HANDLE_KEYBOARD_IRQ - 1] = new Core::Irq(1);
     handles[Abi::INIT_HANDLE_MOUSE_IRQ - 1] = new Core::Irq(12);
 
+    // The disk: the first AHCI (SATA) controller (PCI class 01, subclass 06,
+    // interface 01).
+    auto* storage = Core::PciDevice::find(0x01, 0x06, 0x01);
+    handles[Abi::INIT_HANDLE_STORAGE - 1] = storage;
+    if (storage)
+        log("[pci]  storage     AHCI controller ", Hex{storage->vendor, 4}, ":", Hex{storage->device, 4},
+            " at ", storage->address.bus, ":", storage->address.device, ".", storage->address.function);
+    else
+        log("[pci]  storage     no AHCI controller");
+
     Abi::Error code;
     char const* error = nullptr;
-    Core::Task* init = Programs::start("init", 4, handles, 4, code, error);
+    Core::Task* init = Programs::start("init", 4, handles, 5, code, error);
     if (not init)
         panic("can't start init: is init.elf in the boot image?");
-    log("[core] started init as task ", init->id, " with the framebuffer, PS/2 ports, keyboard and mouse irqs");
+    log("[core] started init as task ", init->id, " with the framebuffer, PS/2 ports, keyboard and mouse irqs",
+        storage ? " and the disk controller" : "");
 }
 
 } // namespace

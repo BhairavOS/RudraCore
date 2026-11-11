@@ -121,4 +121,12 @@ inline long portOut(Handle ports, unsigned short port, unsigned char value) {
     return syscall(SYS_PORT_OUT, ports, port, value);
 }
 
+inline long deviceInfo(Handle device, DeviceInfo& out) { return syscall(SYS_DEVICE_INFO, device, arg(&out)); }
+
+// Returns a shared memory handle for memory BAR `index`, or a negative Error.
+inline long deviceBar(Handle device, unsigned long index) { return syscall(SYS_DEVICE_BAR, device, index); }
+
+// Physical address of shared memory, for the device to use (DMA).
+inline long dmaAddress(Handle device, Handle memory) { return syscall(SYS_DMA_ADDRESS, device, memory); }
+
 } // namespace Kapala::Sys

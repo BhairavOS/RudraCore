@@ -5,9 +5,11 @@
 
 namespace Rudracore {
 
-// Prints an integer in hexadecimal, e.g. log("addr=", Hex{ptr}).
+// Prints an integer in hexadecimal, e.g. log("addr=", Hex{ptr}), with
+// `digits` digits (Hex{id, 4} for a 16-bit value).
 struct Hex {
     u64 value;
+    int digits = 16;
 };
 
 // Prints a byte count in a human readable unit, e.g. "256 MiB".

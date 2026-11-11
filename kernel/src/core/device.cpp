@@ -85,4 +85,41 @@ void Irq::acknowledge() {
     Arch::Pic::unmask(line);
 }
 
+PciDevice::PciDevice(Arch::Pci::Address a) : Object(ObjectType::PciDevice), address(a) {
+    u32 id = Arch::Pci::read32(a, 0x00);
+    u32 classes = Arch::Pci::read32(a, 0x08);
+    vendor = static_cast<u16>(id);
+    device = static_cast<u16>(id >> 16);
+    classCode = static_cast<u8>(classes >> 24);
+    subclass = static_cast<u8>(classes >> 16);
+    progIf = static_cast<u8>(classes >> 8);
+    irqLine = static_cast<u8>(Arch::Pci::read32(a, 0x3C));
+
+    for (u8 i = 0; i < 6; i++) {
+        bars[i] = Arch::Pci::readBar(a, i);
+        bool wide = not bars[i].io and bars[i].address and
+                    ((Arch::Pci::read32(a, static_cast<u8>(0x10 + i * 4)) >> 1) & 3) == 2;
+        if (wide)
+            i++; // the next register holds this BAR's upper half
+    }
+}
+
+void PciDevice::enable() {
+    u16 command = Arch::Pci::read16(address, 0x04);
+    Arch::Pci::write16(address, 0x04, command | 0x2 | 0x4); // memory space, bus master
+}
+
+PciDevice* PciDevice::find(u8 wantClass, u8 wantSubclass, u8 wantProgIf) {
+    Arch::Pci::Address found{};
+    bool any = false;
+    Arch::Pci::forEach([&](Arch::Pci::Address a) {
+        u32 classes = Arch::Pci::read32(a, 0x08);
+        if (not any and (classes >> 8) == ((u32{wantClass} << 16) | (u32{wantSubclass} << 8) | wantProgIf)) {
+            found = a;
+            any = true;
+        }
+    });
+    return any ? new PciDevice(found) : nullptr;
+}
+
 } // namespace Rudracore::Core

@@ -2,9 +2,11 @@
 //
 //   handle 1: the screen (shared memory)
 //   handle 2: input events from the PS/2 driver
+//   handle 3: the file system's connect channel (protocol/fs.h)
 //
 // The compositor and desktop of Bhairav OS. Apps are separate programs: the
-// shell starts each one with a channel (its handle 1), the app creates its
+// shell starts each one with a channel (its handle 1) and a connection to
+// the file system (its handle 2), the app creates its
 // window's pixels in shared memory, and the shell composes every window
 // onto the screen (see kapala/protocol/shell.h).
 //
@@ -15,6 +17,7 @@
 
 #include <kapala/channel.h>
 #include <kapala/gfx.h>
+#include <kapala/protocol/fs.h>
 #include <kapala/protocol/input.h>
 #include <kapala/protocol/shell.h>
 #include <kapala/sys.h>
@@ -31,6 +34,8 @@ namespace {
 
 constexpr Sys::Handle SCREEN = 1;
 constexpr Sys::Handle INPUT = 2;
+constexpr Sys::Handle FILES = 3;
+constexpr Protocol::Fs::Connect CONNECT{Protocol::Fs::CONNECT_MAGIC};
 
 constexpr int MAX_WINDOWS = 16;
 constexpr int TITLE_H = 34;
@@ -167,8 +172,17 @@ private:
 
         Channel mine, theirs;
         Channel::createPair(mine, theirs);
-        Sys::Handle give[] = {theirs.release()};
-        if (Sys::spawn(program, give, 1) < 0) {
+
+        // The app's own file system connection.
+        Channel files, filesServer;
+        Channel::createPair(files, filesServer);
+        if (Sys::send(FILES, &CONNECT, sizeof(CONNECT), filesServer.handle()) == Sys::OK)
+            filesServer.release(); // moved to fs
+
+        Sys::Handle give[] = {theirs.release(), files.release()};
+        if (Sys::spawn(program, give, 2) < 0) {
+            Sys::close(give[0]); // (not moved: spawn changes nothing when it fails)
+            Sys::close(give[1]);
             Text<> message;
             message.add("can't start ").add(program);
             Sys::log(message.cstr());

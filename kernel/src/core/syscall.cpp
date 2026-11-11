@@ -157,6 +157,7 @@ Arch::Frame* sysSystemInfo(Call const& c, Boot::Info const& boot) {
     info.freeMemory = stats.freePages * Mem::PAGE_SIZE;
     info.taskCount = Sched::taskCount();
     info.timeOfDay = Time::timeOfDay();
+    info.unixTime = Time::unixTime();
     if (boot.hasFramebuffer) {
         auto const& fb = boot.framebuffer;
         info.screenWidth = fb.width;
@@ -502,6 +503,60 @@ Arch::Frame* sysPortOut(Call const& c) {
     return c.result(Abi::OK);
 }
 
+Arch::Frame* sysDeviceInfo(Call const& c) {
+    i64 error = 0;
+    auto* device = c.lookup<Core::PciDevice>(c.arg0(), ObjectType::PciDevice, error);
+    if (not device)
+        return c.result(error);
+    if (not c.userMemory(c.arg1(), sizeof(Abi::DeviceInfo), true))
+        return c.result(Abi::BAD_ADDRESS);
+
+    Abi::DeviceInfo info{};
+    info.vendor = device->vendor;
+    info.device = device->device;
+    info.classCode = device->classCode;
+    info.subclass = device->subclass;
+    info.progIf = device->progIf;
+    info.irqLine = device->irqLine;
+    for (int i = 0; i < 6; i++)
+        info.barSize[i] = device->bars[i].io ? 0 : device->bars[i].size;
+    memcpy(reinterpret_cast<void*>(c.arg1()), &info, sizeof(info));
+    return c.result(Abi::OK);
+}
+
+Arch::Frame* sysDeviceBar(Call const& c) {
+    i64 error = 0;
+    auto* device = c.lookup<Core::PciDevice>(c.arg0(), ObjectType::PciDevice, error);
+    if (not device)
+        return c.result(error);
+    u64 index = c.arg1();
+    if (index > 5 or device->bars[index].io or not device->bars[index].size or
+        device->bars[index].size > Core::SharedMemory::MAX_SIZE)
+        return c.result(Abi::INVALID_ARGUMENT);
+
+    auto const& bar = device->bars[index];
+    auto* memory = Core::SharedMemory::device(bar.address, bar.size, Vmm::Cache::Uncached);
+    u64 handle = c.task->addHandle(memory);
+    if (not handle) {
+        memory->unref();
+        return c.result(Abi::NO_SPACE);
+    }
+    device->enable();
+    return c.result(static_cast<i64>(handle));
+}
+
+Arch::Frame* sysDmaAddress(Call const& c) {
+    i64 error = 0;
+    if (not c.lookup<Core::PciDevice>(c.arg0(), ObjectType::PciDevice, error))
+        return c.result(error);
+    auto* memory = c.lookup<Core::SharedMemory>(c.arg1(), ObjectType::Memory, error);
+    if (not memory)
+        return c.result(error);
+    if (not memory->owned)
+        return c.result(Abi::INVALID_ARGUMENT); // device memory, not RAM
+    return c.result(static_cast<i64>(memory->physical));
+}
+
 Boot::Info const* bootInfo = nullptr;
 
 } // namespace
@@ -545,6 +600,9 @@ Arch::Frame* dispatch(Arch::Frame* frame) {
     case Abi::SYS_PORT_OUT: return sysPortOut(c);
     case Abi::SYS_IRQ_BIND: return sysIrqBind(c);
     case Abi::SYS_IRQ_ACK: return sysIrqAck(c);
+    case Abi::SYS_DEVICE_INFO: return sysDeviceInfo(c);
+    case Abi::SYS_DEVICE_BAR: return sysDeviceBar(c);
+    case Abi::SYS_DMA_ADDRESS: return sysDmaAddress(c);
 
     default: return c.result(Abi::UNKNOWN_SYSCALL);
     }

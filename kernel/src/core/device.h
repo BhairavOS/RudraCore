@@ -1,5 +1,6 @@
 #pragma once
 
+#include "arch/x86_64/pci.h"
 #include "core/object.h"
 
 namespace Rudracore::Core {
@@ -45,6 +46,25 @@ struct IoPorts : public Object {
     IoPorts(u16 base, u16 count) : Object(ObjectType::IoPorts), base(base), count(count) {}
 
     bool contains(u16 port) const { return port >= base and port - base < count; }
+};
+
+// A PCI device handed to a userspace driver. Through it the driver can map
+// the device's memory BARs and learn the physical address of its own shared
+// memory, so the device can read and write it (DMA). A DMA-capable device
+// can reach any memory, so only trusted drivers get one.
+struct PciDevice : public Object {
+    Arch::Pci::Address address;
+    u16 vendor, device;
+    u8 classCode, subclass, progIf, irqLine;
+    Arch::Pci::Bar bars[6];
+
+    explicit PciDevice(Arch::Pci::Address address);
+
+    // Turns on memory decoding and bus mastering (DMA).
+    void enable();
+
+    // The first device of this class, or nullptr.
+    static PciDevice* find(u8 classCode, u8 subclass, u8 progIf);
 };
 
 } // namespace Rudracore::Core

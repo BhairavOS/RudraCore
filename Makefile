@@ -84,11 +84,19 @@ STRIPPED := $(BOOT_FILES)/rudracore.elf $(USER_PROGRAMS:%=$(BOOT_FILES)/%.elf)
 # UEFI boot program, plus the kernel, programs and shool.cfg.
 EFI_IMG := $(BUILD)/efiboot.img
 
-QEMU_FLAGS := -M q35 -m 256M -cdrom $(ISO) -boot d
+# The disk: a FAT32 image attached as a SATA disk (q35's AHCI controller).
+# Created once and never rebuilt, so files saved in Bhairav OS stay (it
+# lives outside build/, which `make clean` deletes). Delete it to start over.
+DISK := disk.img
+DISK_MB := 64
 
-.PHONY: all kernel user shool iso run run-uefi shot clean FORCE
+QEMU_FLAGS := -M q35 -m 256M -cdrom $(ISO) -boot d 	-drive file=$(DISK),format=raw,if=none,id=disk -device ide-hd,drive=disk,bus=ide.0
 
-all: iso
+.PHONY: all kernel user shool iso disk run run-uefi shot clean FORCE
+
+all: iso $(DISK)
+
+disk: $(DISK)
 
 kernel: $(KERNEL)
 user: $(USER_ELFS)
@@ -166,6 +174,10 @@ $(EFI_IMG): $(SHOOL_EFI) $(STRIPPED) boot/shool.cfg
 	mcopy -i $@ $(SHOOL_EFI) ::/EFI/BOOT/BOOTX64.EFI
 	mcopy -i $@ $(STRIPPED) boot/shool.cfg ::/boot/
 
+# A blank FAT32 volume (no partition table) with a welcome file.
+$(DISK): assets/welcome.txt
+	@if [ -f $@ ]; then touch $@; exit 0; fi; 	dd if=/dev/zero of=$@.tmp bs=1M count=$(DISK_MB) status=none && 	mformat -i $@.tmp -F -v BHAIRAV :: && 	mcopy -i $@.tmp assets/welcome.txt ::/welcome.txt && 	mv $@.tmp $@
+
 # One ISO for both firmware types:
 #   UEFI -> ShoolLoader🔱 (from the FAT boot image)
 #   BIOS -> Limine (ShoolLoader is UEFI-only), reading the ISO's /boot
@@ -183,16 +195,16 @@ $(ISO): $(EFI_IMG) $(STRIPPED) boot/limine.conf
 	$(LIMINE_DIR)/limine bios-install $@ 2>/dev/null
 
 # Serial console in the terminal (no window). Quit with Ctrl+A then X.
-run: $(ISO)
+run: $(ISO) $(DISK)
 	qemu-system-x86_64 $(QEMU_FLAGS) -nographic
 
-run-uefi: $(ISO)
+run-uefi: $(ISO) $(DISK)
 	qemu-system-x86_64 $(QEMU_FLAGS) -bios $(OVMF) -nographic
 
 # Boots headless, saves the screen to build/screen.png and the serial log to
 # build/serial.log. Set FIRMWARE=uefi to boot through UEFI instead of BIOS.
-shot: $(ISO)
-	sh scripts/screenshot.sh $(ISO) $(BUILD) $(if $(filter uefi,$(FIRMWARE)),$(OVMF))
+shot: $(ISO) $(DISK)
+	sh scripts/screenshot.sh $(ISO) $(BUILD) $(DISK) $(if $(filter uefi,$(FIRMWARE)),$(OVMF))
 
 clean:
 	rm -rf $(BUILD)

@@ -36,6 +36,7 @@ struct Text {
     }
 
     Text& add(int value) { return add(static_cast<long>(value)); }
+    Text& add(unsigned value) { return add(static_cast<unsigned long>(value)); }
 
     char const* cstr() const { return data; }
 };
