@@ -27,9 +27,9 @@ constexpr int PAD = 12, LINE_H = 18;
 constexpr int MAX_LINES = 1200, LINE_CAP = 240;
 constexpr int MAX_HISTORY = 32;
 
-constexpr Color BACKGROUND = Color::hex(0x0E0A1C);
+constexpr Color BACKGROUND = Color::hex(0x141219);
 constexpr Color PROMPT = Theme::SAFFRON;
-constexpr Color OUTPUT = Color::hex(0xE4DDF0);
+constexpr Color OUTPUT = Color::hex(0xE6E3EC);
 constexpr Color ERROR = Color::hex(0xFF8FAB);
 constexpr Color GOOD = Color::hex(0x7BE0A8);
 

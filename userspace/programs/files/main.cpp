@@ -24,8 +24,8 @@ constexpr int TOOLBAR_H = 48, HEADER_H = 26, ROW_H = 30, STATUS_H = 26;
 constexpr int MAX_ENTRIES = 512;
 constexpr unsigned long DOUBLE_CLICK_MS = 450;
 
-constexpr Color PANE = Color::hex(0x191230);
-constexpr Color ROW_ALT = Color::hex(0x1C1535);
+constexpr Color PANE = Color::hex(0x18161E);
+constexpr Color ROW_ALT = Color::hex(0x1C1A23);
 
 unsigned long length(char const* s) {
     unsigned long n = 0;
@@ -396,13 +396,13 @@ private:
 
     void icon(Canvas& c, int x, int y, bool folder) {
         if (folder) {
-            c.fillRounded({x, y + 2, 9, 5}, 2, Color::hex(0xF2A33A));
-            c.fillRounded({x, y + 5, 18, 13}, 3, Color::hex(0xF2A33A));
-            c.fillRounded({x, y + 8, 18, 10}, 3, Color::hex(0xFFC857));
+            c.fillRounded({x, y + 2, 9, 5}, 2, Color::hex(0x4A90E8));
+            c.fillRounded({x, y + 5, 18, 13}, 3, Color::hex(0x4A90E8));
+            c.fillRounded({x, y + 8, 18, 10}, 3, Color::hex(0x7DB4F5));
         } else {
-            c.fillRounded({x + 2, y, 14, 18}, 2, Color::hex(0xEDE6F7));
+            c.fillRounded({x + 2, y, 14, 18}, 2, Color::hex(0xE9E7EF));
             for (int l = 0; l < 3; l++)
-                c.fill({x + 5, y + 5 + l * 4, 8, 1}, Color::hex(0x9A8FB3));
+                c.fill({x + 5, y + 5 + l * 4, 8, 1}, Color::hex(0x9C99A8));
         }
     }
 
@@ -441,7 +441,7 @@ private:
             FileEntry const& e = _entries[i];
             Rect row{0, y, w, ROW_H};
             if (i == _selected)
-                c.fill(row, _window.focused() ? Theme::SAFFRON.withAlpha(70) : Theme::SURFACE_ALT);
+                c.fillRounded({6, y + 1, w - 12, ROW_H - 2}, 6, _window.focused() ? Theme::SAFFRON.withAlpha(85) : Theme::HOVER);
             else if (i % 2)
                 c.fill(row, ROW_ALT);
             icon(c, 16, y + 6, e.directory);

@@ -26,8 +26,8 @@ using namespace Browser;
 
 namespace {
 
-constexpr int WIDTH = 1040;
-constexpr int HEIGHT = 680;
+constexpr int WIDTH = 1000;
+constexpr int HEIGHT = 600;
 constexpr int TOOLBAR_H = 48;
 constexpr int STATUS_H = 26;
 constexpr int SCROLLBAR_W = 12;
@@ -46,9 +46,9 @@ struct CachedImage {
     Kapala::Image shown; // scaled to the size it's shown at
 };
 
-constexpr Rect BACK{10, 8, 34, 32};
-constexpr Rect RELOAD{48, 8, 34, 32};
-constexpr Rect HOME{86, 8, 34, 32};
+constexpr Rect BACK{10, 8, 32, 32};
+constexpr Rect RELOAD{44, 8, 32, 32};
+constexpr Rect HOME{78, 8, 32, 32};
 
 // These follow the window's size (see App::updateLayout).
 int windowW = WIDTH, windowH = HEIGHT;
@@ -59,7 +59,7 @@ void updateLayout(int w, int h) {
     windowH = h;
     PAGE = {0, TOOLBAR_H, w - SCROLLBAR_W, h - TOOLBAR_H - STATUS_H};
     SCROLLBAR = {w - SCROLLBAR_W, TOOLBAR_H, SCROLLBAR_W, h - TOOLBAR_H - STATUS_H};
-    ADDRESS = {130, 8, w - 140, 32};
+    ADDRESS = {122, 8, w - 132, 32};
 }
 
 char const HOME_PAGE[] = R"(<title>Bhairav Browser</title>
@@ -594,8 +594,10 @@ private:
             return;
         }
         int link = PAGE.contains(at) ? linkAt(at) : -1;
-        if (link != _hoverLink) {
+        int button = BACK.contains(at) ? 0 : RELOAD.contains(at) ? 1 : HOME.contains(at) ? 2 : -1;
+        if (link != _hoverLink or button != _hoverButton) {
             _hoverLink = link;
+            _hoverButton = button;
             redraw();
         }
     }
@@ -684,36 +686,42 @@ private:
         c.clip = _window.surface().bounds();
 
         // Scrollbar.
-        c.fill(SCROLLBAR, Color::hex(0xEDE7F2));
+        c.fill(SCROLLBAR, Colors::PAPER);
         if (maxScroll() > 0)
-            c.fillRounded(thumbRect(), 3, _draggingThumb ? Theme::SAFFRON : Color::hex(0xB9AECB));
+            c.fillRounded(thumbRect(), 3, _draggingThumb ? Theme::SAFFRON : Color::hex(0xC9C4D2));
 
         // Toolbar.
         Rect toolbar{0, 0, windowW, TOOLBAR_H};
         c.fill(toolbar, Theme::SURFACE);
-        c.fill({0, TOOLBAR_H - 1, windowW, 1}, Theme::BORDER);
-        button(c, BACK, "<", _historyCount > 1);
-        button(c, RELOAD, "R", true);
-        button(c, HOME, "H", true);
+        c.fill({0, TOOLBAR_H - 1, windowW, 1}, Color::hex(0x000000, 70));
+        iconButton(c, BACK, 0, _historyCount > 1);
+        iconButton(c, RELOAD, 1, true);
+        iconButton(c, HOME, 2, true);
 
-        c.fillRounded(ADDRESS, 8, Theme::SURFACE_ALT);
+        c.fillRounded(ADDRESS, 9, Theme::SURFACE_ALT);
         if (_editing)
-            c.strokeRounded(ADDRESS, 8, 1.5f, Theme::SAFFRON);
+            c.strokeRounded(ADDRESS, 9, 1.5f, Theme::SAFFRON.withAlpha(200));
+        if (_url.isHttps() and not _editing) { // a small lock
+            int lx = ADDRESS.x + 13, ly = ADDRESS.y + 9;
+            c.strokeRounded({lx + 2, ly, 7, 9}, 3.5f, 1.5f, Theme::TEXT_DIM);
+            c.fillRounded({lx, ly + 6, 11, 9}, 2, Theme::TEXT_DIM);
+        }
+        int addressX = ADDRESS.x + (_url.isHttps() and not _editing ? 32 : 14);
         char const* shown = _editing ? _typed : _address;
-        int maxChars = (ADDRESS.w - 28) / font.width;
+        int maxChars = (ADDRESS.w - 46) / font.width;
         u64 n = length(shown);
         char const* visible = n > static_cast<u64>(maxChars) ? shown + n - static_cast<u64>(maxChars) : shown;
         int textY = ADDRESS.y + (ADDRESS.h - font.height) / 2;
         if (_editing and _selected and visible[0])
-            c.fill({ADDRESS.x + 12, textY - 2, font.measure(visible) + 4, font.height + 4}, Theme::LOTUS.withAlpha(110));
-        int end = c.text({ADDRESS.x + 14, textY}, visible, _editing ? Theme::TEXT : Theme::TEXT_DIM);
+            c.fillRounded({addressX - 2, textY - 2, font.measure(visible) + 4, font.height + 4}, 3, Theme::SAFFRON.withAlpha(90));
+        int end = c.text({addressX, textY}, visible, _editing ? Theme::TEXT : Theme::TEXT_DIM);
         if (_editing and _caret)
             c.fill({end + 1, textY - 1, 2, font.height + 2}, Theme::SAFFRON);
 
         // Status bar.
         Rect status{0, windowH - STATUS_H, windowW, STATUS_H};
         c.fill(status, Theme::SURFACE);
-        c.fill({0, status.y, windowW, 1}, Theme::BORDER);
+        c.fill({0, status.y, windowW, 1}, Color::hex(0x000000, 70));
         int statusY = status.y + (STATUS_H - font.height) / 2;
         if (_hoverLink >= 0) {
             Url target;
@@ -757,11 +765,22 @@ private:
         }
     }
 
-    void button(Canvas& c, Rect r, char const* label, bool enabled) {
-        c.fillRounded(r, 8, Theme::SURFACE_ALT);
-        Font const& font = Font::system();
-        c.text({r.x + (r.w - font.measure(label)) / 2, r.y + (r.h - font.height) / 2}, label,
-               enabled ? Theme::TEXT : Theme::BORDER);
+    // Back (an arrow), reload (a circular arrow) and home (a little house).
+    void iconButton(Canvas& c, Rect r, int which, bool enabled) {
+        if (_hoverButton == which and enabled)
+            c.fillRounded(r, 8, Theme::HOVER);
+        Color ink = enabled ? Theme::TEXT : Theme::TEXT_DIM.withAlpha(90);
+        if (which == 2) {
+            int cx = r.x + r.w / 2, base = r.y + 23;
+            for (int row = 0; row < 7; row++) // the roof, row by row
+                c.fill({cx - row - 1, base - 13 + row, 2 * row + 2, 1}, ink);
+            c.fill({cx - 6, base - 7, 12, 8}, ink);
+            c.fill({cx - 2, base - 4, 4, 5}, _hoverButton == which ? Theme::HOVER : Theme::SURFACE);
+            return;
+        }
+        Font const& font = Font::get("sans-bold", 18);
+        char const* glyph = which == 0 ? "\u2190" : "\u21bb";
+        c.text({r.x + (r.w - font.measure(glyph)) / 2, r.y + (r.h - font.height) / 2}, glyph, ink, font);
     }
 
     Window _window;
@@ -784,6 +803,7 @@ private:
 
     bool _remember = false;
     bool _editing = false, _caret = false, _ctrl = false, _selected = false;
+    int _hoverButton = -1;
     char _typed[600] = {};
     char _status[160] = "Ready";
 

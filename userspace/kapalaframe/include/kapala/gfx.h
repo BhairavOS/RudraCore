@@ -48,17 +48,20 @@ struct Color {
 
 // Bhairav OS colors.
 namespace Theme {
-constexpr Color NIGHT = Color::hex(0x140B2E);
-constexpr Color MAROON = Color::hex(0x3B0D2E);
-constexpr Color SURFACE = Color::hex(0x1E1638);     // windows
-constexpr Color SURFACE_ALT = Color::hex(0x2A2048); // fields, raised areas
-constexpr Color BORDER = Color::hex(0x463A6B);
+// Calm, slightly warm neutrals, with saffron and lotus as accents.
+constexpr Color NIGHT = Color::hex(0x120F1A);
+constexpr Color MAROON = Color::hex(0x2B1027);
+constexpr Color SURFACE = Color::hex(0x1E1C25);     // windows
+constexpr Color SURFACE_ALT = Color::hex(0x2A2832); // fields, buttons, raised areas
+constexpr Color HOVER = Color::hex(0x34313E);       // something under the pointer
+constexpr Color BORDER = Color::hex(0x3B3846);
+constexpr Color HAIRLINE = Color::hex(0xFFFFFF, 18); // thin separators over anything
 constexpr Color SAFFRON = Color::hex(0xFF9933);
 constexpr Color GOLD = Color::hex(0xFFC857);
 constexpr Color LOTUS = Color::hex(0xE75480);
 constexpr Color LOTUS_LIGHT = Color::hex(0xFF8FAB);
-constexpr Color TEXT = Color::hex(0xF0EAF8);
-constexpr Color TEXT_DIM = Color::hex(0xA89CC0);
+constexpr Color TEXT = Color::hex(0xEEECF3);
+constexpr Color TEXT_DIM = Color::hex(0x9E9AAB);
 constexpr Color WHITE = Color::hex(0xFFFFFF);
 constexpr Color BLACK = Color::hex(0x000000);
 } // namespace Theme
