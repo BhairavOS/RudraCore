@@ -17,6 +17,10 @@ void mask(u8 irq);
 
 void endOfInterrupt(u8 irq);
 
+// PCI interrupts are level-triggered: tells the PICs (through the ELCR
+// registers) to treat this line that way.
+void setLevelTriggered(u8 irq);
+
 // IRQ 7 and 15 can fire spuriously; those must not be acknowledged.
 bool isSpurious(u8 irq);
 

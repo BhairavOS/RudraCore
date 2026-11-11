@@ -8,6 +8,7 @@
 #   KEYS="h i ret"  QEMU key names to type after WAIT (tests the keyboard driver)
 #   MONITOR="mouse_move 40 10; mouse_button 1; mouse_button 0"
 #                 QEMU monitor commands to run after KEYS (tests the mouse)
+#   STEP=0.3      seconds between MONITOR commands (lower it for double clicks)
 set -eu
 
 ISO="$1"
@@ -18,11 +19,13 @@ WAIT="${WAIT:-5}"
 MEMORY="${MEMORY:-256M}"
 KEYS="${KEYS:-}"
 MONITOR="${MONITOR:-}"
+STEP="${STEP:-0.3}"
 
 rm -f "$OUT/screen.png" "$OUT/serial.log"
 
 set -- -M q35 -m "$MEMORY" -cdrom "$ISO" -boot d \
     -drive "file=$DISK,format=raw,if=none,id=disk" -device ide-hd,drive=disk,bus=ide.0 \
+    -netdev user,id=net -device e1000,netdev=net \
     -display none -serial "file:$OUT/serial.log" -monitor stdio
 if [ -n "$FIRMWARE" ]; then
     set -- "$@" -bios "$FIRMWARE"
@@ -39,7 +42,7 @@ fi
     echo "$MONITOR" | tr ';' '\n' | while read -r command; do
         if [ -n "$command" ]; then
             echo "$command"
-            sleep 0.3
+            sleep "$STEP"
         fi
     done
     if [ -n "$KEYS$MONITOR" ]; then

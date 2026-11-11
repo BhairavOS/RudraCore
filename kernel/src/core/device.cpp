@@ -122,4 +122,21 @@ PciDevice* PciDevice::find(u8 wantClass, u8 wantSubclass, u8 wantProgIf) {
     return any ? new PciDevice(found) : nullptr;
 }
 
+PciDevice* PciDevice::findById(u16 vendor, u16 const* devices, usize count) {
+    Arch::Pci::Address found{};
+    bool any = false;
+    Arch::Pci::forEach([&](Arch::Pci::Address a) {
+        u32 id = Arch::Pci::read32(a, 0x00);
+        if (any or (id & 0xFFFF) != vendor)
+            return;
+        for (usize i = 0; i < count; i++) {
+            if ((id >> 16) == devices[i]) {
+                found = a;
+                any = true;
+            }
+        }
+    });
+    return any ? new PciDevice(found) : nullptr;
+}
+
 } // namespace Rudracore::Core

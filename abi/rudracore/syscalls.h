@@ -111,6 +111,11 @@ enum Error : long {
     IO_ERROR = -16,     // the disk failed
     IS_DIRECTORY = -17, // wanted a file
     NOT_DIRECTORY = -18,
+
+    // Used by the network server
+    CONNECTION_REFUSED = -19,
+    CONNECTION_RESET = -20,
+    NETWORK_DOWN = -21, // no address yet (DHCP hasn't answered) or no network card
 };
 
 // Handles init starts with (when the hardware exists).
@@ -120,6 +125,8 @@ enum InitHandle : Handle {
     INIT_HANDLE_KEYBOARD_IRQ = 3,
     INIT_HANDLE_MOUSE_IRQ = 4,
     INIT_HANDLE_STORAGE = 5,     // PCI device: the AHCI (SATA) disk controller
+    INIT_HANDLE_NETWORK = 6,     // PCI device: the network card (Intel e1000 family)
+    INIT_HANDLE_NETWORK_IRQ = 7, // its interrupt line
 };
 
 struct SystemInfo {

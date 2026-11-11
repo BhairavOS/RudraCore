@@ -30,10 +30,16 @@ The compiler, assembler, ISO tools and QEMU all run inside a container.
 
 For a QEMU window on Windows: `winget install SoftwareFreedomConservancy.QEMU`.
 After the boot screen, KamalShell🪷 starts with the About window open.
-Click the lotus in the corner to open the launcher (About, Notes, System
-Monitor), drag windows by their title bar, click one to bring it to the
-front, and close it with its x. Click inside the QEMU window to give it the
-mouse; Ctrl+Alt+G releases it.
+Double-click a desktop icon (Browser, Files, Terminal, Notes, Monitor,
+About) or click the lotus in the corner for the launcher. Drag windows by
+their title bar; resize them by the dots in the bottom-right corner;
+maximize them with the square button or a double click on the title bar;
+close them with x. Click inside the QEMU window to give it the mouse;
+Ctrl+Alt+G releases it.
+
+QEMU gives Bhairav OS a network card (an Intel e1000) on its built-in
+network, which reaches the internet through your PC, so the Browser and
+the Terminal's `ping`, `host` and `get` work out of the box.
 
 QEMU also gets a disk: `disk.img`, a 64 MiB FAT32 volume created by the
 first build. Notes keeps its text there in `/notes.txt` (Ctrl+S saves, and
@@ -49,6 +55,7 @@ Testing options (inside `.\bhairav.ps1 shell`, or on Linux):
 ```sh
 make shot PANIC_TEST=1                 # fault on purpose to check the panic screen
 make shot FIRMWARE=uefi WAIT=9         # boot through UEFI instead of BIOS
+STEP=0.1 MONITOR="..." make shot       # faster mouse commands (e.g. double clicks)
 MEMORY=4G make shot                    # boot with more RAM
 KEYS="h i ret" make shot               # type on the virtual keyboard after boot
 MONITOR="mouse_move 41 13; mouse_button 1; mouse_button 0" make shot   # use the mouse
@@ -96,6 +103,7 @@ the `ps2` driver gets the controller's ports and the keyboard and mouse IRQs
 plus a channel for input events; **KamalShell** gets the screen and the
 other end of that channel. The kernel finds the disk controller on the PCI
 bus; init gives it to the `ahci` driver, and connects `fs` to that driver.
+Likewise the network card and its interrupt go to `net`.
 When a program maps the screen, the kernel stops
 drawing on it (logs continue on serial; a panic still takes the screen back).
 A program can wait on many channels at once, with a timeout (`SYS_WAIT`).
@@ -163,6 +171,60 @@ long count = files.list("/", entries, 16);
 Paths are absolute and case-insensitive. The `fs-test` program checks all
 of this at every boot and removes what it made.
 
+## Network
+
+**`net`** (`userspace/programs/net/`) drives the network card and runs the
+TCP/IP stack, written from scratch: Ethernet, ARP, IPv4, ICMP (ping), UDP,
+a DHCP client (it gets its address at boot), a DNS resolver with a cache,
+and TCP connections with retransmission. The card driver (`e1000.cpp`) is
+kept apart from the stack (`stack.cpp`), behind `send` and `receive`.
+
+KamalShell connects every app to `net` as its handle 3. Apps use
+`Kapala::Net`:
+
+```cpp
+Net net;
+net.connect(3);
+unsigned address;
+net.resolve("example.com", address);
+long socket = net.tcpConnect(address, 80);
+net.send(socket, request, length);
+long n = net.receive(socket, buffer, sizeof(buffer)); // 0: the other side closed
+net.close(socket);
+```
+
+The `net-test` program checks DHCP, ping, DNS and an HTTP download at
+every boot.
+
+## Bhairav Browser
+
+`userspace/programs/browser/`: loads pages over HTTP (following
+redirects), lays out HTML (headings, paragraphs, lists, links, emphasis,
+code, preformatted text, quotes, rules, simple tables, image descriptions,
+entities) and draws it on a paper-colored page. Links, back/reload/home,
+an address bar that also searches (typing words searches through
+[FrogFind](http://frogfind.com), a search engine made for small browsers),
+and scrolling with the wheel, keys or the scrollbar.
+
+It doesn't speak **HTTPS** yet (that needs TLS encryption): for an HTTPS
+link it explains this and offers a simplified copy through FrogFind's
+reader, a third-party service that fetches the page for you. Scripts,
+styles and pictures aren't supported.
+
+## Desktop
+
+- **Icons** for the apps, opened with a double click.
+- **Windows** can be moved, resized (apps that support it get a
+  `WindowEvent::Resize`), maximized and closed.
+- **Taskbar:** launcher, a button per window, the network status and
+  address, and the date and time (UTC).
+- **Apps:** Browser, **Files** (folders and files on the disk, sizes and
+  dates, new folder or file, delete, open in Notes), **Terminal** (`help`
+  lists its commands: files, network, system, opening apps), Notes,
+  System Monitor and About.
+- Apps can start other apps with an argument (`Window::launch("notes",
+  "/a.txt")`), and read theirs with `Window::argument()`.
+
 ## Kapalaframe
 
 The library every program links against (`userspace/kapalaframe/`):
@@ -173,12 +235,13 @@ The library every program links against (`userspace/kapalaframe/`):
 | `kapala/channel.h` | `Channel`: typed messages over channels |
 | `kapala/heap.h` | The heap behind `new` and `delete` |
 | `kapala/gfx.h` | `Bitmap`, `Color`, `Rect` and `Canvas`: clipped, anti-aliased rounded rectangles, circles, gradients, shadows, text and images, plus the Bhairav OS theme colors |
-| `kapala/window.h` | `Window`: a window on KamalShell, with events and timeouts |
+| `kapala/window.h` | `Window`: a window on KamalShell, with events, timeouts, resizing and launching apps |
 | `kapala/files.h` | `Files`: read, write, append, list, remove and make directories on the disk |
+| `kapala/net.h` | `Net`: DNS, ping and TCP connections |
 | `kapala/text.h` | `Text`: build strings without the heap |
 | `kapala/protocol/input.h` | Keyboard and mouse events |
 | `kapala/protocol/shell.h` | The KamalShell window protocol |
-| `kapala/protocol/block.h`, `fs.h` | The disk driver and file system protocols |
+| `kapala/protocol/block.h`, `fs.h`, `net.h` | The disk driver, file system and network protocols |
 
 ## Layout
 
@@ -201,10 +264,11 @@ The library every program links against (`userspace/kapalaframe/`):
 | `boot/limine.conf` | Limine configuration, for legacy BIOS boot |
 | `legacy/` | Earlier sources, kept for reference, not built |
 
-Programs today: `init` (root of userspace), `ps2` (keyboard and mouse
-driver), `ahci` (disk driver), `fs` (file system), `kamalshell` (the
-desktop), the apps `about`, `notes` and `monitor`, and `ipc-test`,
-`protect-test`, `fpu-test` and `fs-test` (checks run at every boot).
+Programs today: `init` (root of userspace), `ps2` (keyboard and wheel
+mouse driver), `ahci` (disk driver), `fs` (file system), `net` (network
+card and TCP/IP), `kamalshell` (the desktop), the apps `browser`, `files`,
+`terminal`, `notes`, `monitor` and `about`, and `ipc-test`, `protect-test`,
+`fpu-test`, `fs-test` and `net-test` (checks run at every boot).
 
 ## Roadmap
 
@@ -229,8 +293,15 @@ Bhairav OS is built from scratch, one working step at a time:
    driver, FAT32 file system server with long names and directories,
    `Kapala::Files`; Notes saves to disk; the clock knows the date
 
-Next: a terminal and a file manager, NVMe disks (most new laptops),
-loading programs from disk, multi-core, USB input, and smoother text.
+9. **Network** ✅: e1000 driver, TCP/IP stack (ARP, IPv4, ICMP, UDP, DHCP,
+   DNS, TCP), `Kapala::Net`
+10. **Bhairav Browser** ✅: HTTP, HTML layout, links, history, search
+11. **Desktop** ✅: icons, resizable and maximizable windows, mouse wheel and
+    arrow keys, network status and date in the taskbar, Files and Terminal
+
+Next: HTTPS (TLS) for the browser, smoother text (a vector font),
+pictures, NVMe disks and USB input (most new laptops), loading programs
+from disk, and multi-core.
 
 ## License
 

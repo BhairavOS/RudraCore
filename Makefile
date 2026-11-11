@@ -90,7 +90,8 @@ EFI_IMG := $(BUILD)/efiboot.img
 DISK := disk.img
 DISK_MB := 64
 
-QEMU_FLAGS := -M q35 -m 256M -cdrom $(ISO) -boot d 	-drive file=$(DISK),format=raw,if=none,id=disk -device ide-hd,drive=disk,bus=ide.0
+QEMU_FLAGS := -M q35 -m 256M -cdrom $(ISO) -boot d 	-drive file=$(DISK),format=raw,if=none,id=disk -device ide-hd,drive=disk,bus=ide.0 \
+	-netdev user,id=net -device e1000,netdev=net
 
 .PHONY: all kernel user shool iso disk run run-uefi shot clean FORCE
 

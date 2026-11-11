@@ -65,6 +65,9 @@ struct PciDevice : public Object {
 
     // The first device of this class, or nullptr.
     static PciDevice* find(u8 classCode, u8 subclass, u8 progIf);
+
+    // The first device with this vendor and one of these device IDs.
+    static PciDevice* findById(u16 vendor, u16 const* devices, usize count);
 };
 
 } // namespace Rudracore::Core

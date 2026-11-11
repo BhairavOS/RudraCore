@@ -6,12 +6,15 @@
 //   3: the keyboard interrupt
 //   4: the mouse interrupt
 //   5: the disk controller (AHCI), if there is one
+//   6: the network card (e1000), if there is one
+//   7: its interrupt line
 // init decides who gets what: it starts each driver and program with just
 // the handles that program needs, and finally KamalShell🪷.
 
 #include <kapala/channel.h>
 #include <kapala/protocol/fs.h>
 #include <kapala/protocol/input.h>
+#include <kapala/protocol/net.h>
 #include <kapala/sys.h>
 #include <kapala/text.h>
 
@@ -96,11 +99,28 @@ Channel startStorage() {
     return connect;
 }
 
-// Gives `program` a new fs connection as its handle 1.
-void spawnWithFiles(char const* program, Channel& connect) {
+// The network: net drives the card and runs TCP/IP. Returns the channel
+// that connects new clients to it.
+Channel startNetwork() {
+    Channel connect, netEnd;
+    Channel::createPair(connect, netEnd);
+    Sys::Handle net[] = {Sys::INIT_HANDLE_NETWORK, netEnd.handle(), Sys::INIT_HANDLE_NETWORK_IRQ};
+    long result = Sys::spawn("net", net, 3);
+    if (result == Sys::BAD_HANDLE)
+        result = Sys::spawn("net", net, 2); // a card without a usable interrupt: polled
+    if (result >= 0)
+        netEnd.release();
+    else
+        Sys::log("no network card: the network is unavailable");
+    return connect;
+}
+
+// Gives `program` a new connection (to fs or net) as its handle 1.
+template <typename ConnectMessage>
+void spawnConnected(char const* program, Channel& connect, ConnectMessage message) {
     Channel mine, theirs;
     Channel::createPair(mine, theirs);
-    if (connect.send(Protocol::Fs::Connect{Protocol::Fs::CONNECT_MAGIC}, theirs.handle()) == Sys::OK)
+    if (connect.send(message, theirs.handle()) == Sys::OK)
         theirs.release();
     Sys::Handle give[] = {mine.handle()};
     if (Sys::spawn(program, give, 1) >= 0)
@@ -142,7 +162,9 @@ int main() {
     checkIpc();
 
     Channel files = startStorage();
-    spawnWithFiles("fs-test", files);
+    spawnConnected("fs-test", files, Protocol::Fs::Connect{Protocol::Fs::CONNECT_MAGIC});
+    Channel network = startNetwork();
+    spawnConnected("net-test", network, Protocol::Net::Connect{Protocol::Net::CONNECT_MAGIC});
 
     // Input: the PS/2 driver gets the controller and both IRQs, and sends
     // events to whoever holds the other end of `input`.
@@ -159,10 +181,10 @@ int main() {
         echoKeyboard(input);
 
     // Leave the boot screen up for a moment, then hand the screen, the
-    // input and file access to KamalShell, which starts the apps.
+    // input, files and the network to KamalShell, which starts the apps.
     Sys::sleep(1500);
-    Sys::Handle shell[] = {Sys::INIT_HANDLE_FRAMEBUFFER, input.release(), files.release()};
-    if (Sys::spawn("kamalshell", shell, 3) < 0)
+    Sys::Handle shell[] = {Sys::INIT_HANDLE_FRAMEBUFFER, input.release(), files.release(), network.release()};
+    if (Sys::spawn("kamalshell", shell, 4) < 0)
         Sys::log("can't start KamalShell");
 
     for (;;)

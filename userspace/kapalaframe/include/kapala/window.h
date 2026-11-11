@@ -27,6 +27,8 @@ struct WindowEvent {
         MouseUp,
         Key,
         Focus,
+        Wheel, // the mouse wheel turned over the window (see `wheel`)
+        Resize, // the window has a new size: lay out and redraw everything
         Close, // the user closed the window (or the shell is gone)
     };
 
@@ -36,13 +38,21 @@ struct WindowEvent {
     char character;   // Key: the typed character, or 0
     unsigned char scancode;
     bool pressed; // Key: pressed or released; Focus: gained or lost
+    int wheel;    // Wheel: steps, positive to scroll down
 };
 
 class Window {
 public:
     // Opens a window through the shell connection every app gets as
-    // handle 1. Waits until the shell shows it.
-    bool open(char const* title, int width, int height, Sys::Handle shell = 1);
+    // handle 1. Waits until the shell shows it. A resizable window can be
+    // resized and maximized by the user (WindowEvent::Resize).
+    bool open(char const* title, int width, int height, Sys::Handle shell = 1, bool resizable = false);
+
+    // What the app was launched with (e.g. a file to open), or "".
+    char const* argument() const { return _argument; }
+
+    // Asks the shell to start another app, e.g. launch("notes", "/a.txt").
+    void launch(char const* program, char const* argument = "");
 
     // The window's pixels: draw here, then present().
     Gfx::Bitmap& surface() { return _surface; }
@@ -61,9 +71,13 @@ public:
     bool waitEvent(WindowEvent& event, unsigned long timeoutMs = Sys::WAIT_FOREVER);
 
 private:
+    bool resize(int width, int height);
+
     Channel _shell;
     Gfx::Bitmap _surface;
+    Gfx::PixelFormat _format;
     bool _focused = false;
+    char _argument[96] = {};
 };
 
 } // namespace Kapala

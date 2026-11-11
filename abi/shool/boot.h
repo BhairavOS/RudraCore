@@ -68,7 +68,7 @@ struct Module {
 
 struct BootInfo {
     static constexpr uint32_t MAX_REGIONS = 256;
-    static constexpr uint32_t MAX_MODULES = 16;
+    static constexpr uint32_t MAX_MODULES = 32;
 
     uint64_t magic; // MAGIC
     uint32_t version;
@@ -94,6 +94,6 @@ struct BootInfo {
 static_assert(sizeof(MemoryRegion) == 24);
 static_assert(sizeof(Framebuffer) == 40);
 static_assert(sizeof(Module) == 48);
-static_assert(sizeof(BootInfo) == 16 + 48 + 32 + 40 + 8 + 24 * 256 + 8 + 48 * 16);
+static_assert(sizeof(BootInfo) == 16 + 48 + 32 + 40 + 8 + 24 * 256 + 8 + 48 * 32);
 
 } // namespace Shool

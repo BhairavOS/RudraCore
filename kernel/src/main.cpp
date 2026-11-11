@@ -141,7 +141,7 @@ void clockTask(u64) {
 // Starts init, the root of userspace, and hands it the hardware: it decides
 // which driver gets what. The kernel itself never starts other programs.
 void startInit(Boot::Info const& info) {
-    Core::Object* handles[5] = {};
+    Core::Object* handles[7] = {};
 
     if (info.hasFramebuffer) {
         auto const& fb = info.framebuffer;
@@ -164,13 +164,32 @@ void startInit(Boot::Info const& info) {
     else
         log("[pci]  storage     no AHCI controller");
 
+    // The network card: an Intel e1000 (82540EM, QEMU's default and common
+    // in virtual machines), 82545EM or 82574L, plus its interrupt line.
+    static constexpr u16 E1000_IDS[] = {0x100E, 0x100F, 0x10D3, 0x1004};
+    auto* network = Core::PciDevice::findById(0x8086, E1000_IDS, sizeof(E1000_IDS) / sizeof(E1000_IDS[0]));
+    handles[Abi::INIT_HANDLE_NETWORK - 1] = network;
+    if (network) {
+        u8 line = network->irqLine;
+        bool usable = line > 2 and line < 16 and line != 8 and line != 12 and line != 13;
+        if (usable) {
+            Arch::Pic::setLevelTriggered(line);
+            handles[Abi::INIT_HANDLE_NETWORK_IRQ - 1] = new Core::Irq(line);
+        }
+        log("[pci]  network     Intel ", Hex{network->vendor, 4}, ":", Hex{network->device, 4}, " at ",
+            network->address.bus, ":", network->address.device, ".", network->address.function, ", irq ",
+            usable ? static_cast<u64>(line) : 0, usable ? "" : " (unusable: the driver will poll)");
+    } else {
+        log("[pci]  network     no supported card");
+    }
+
     Abi::Error code;
     char const* error = nullptr;
-    Core::Task* init = Programs::start("init", 4, handles, 5, code, error);
+    Core::Task* init = Programs::start("init", 4, handles, 7, code, error);
     if (not init)
         panic("can't start init: is init.elf in the boot image?");
     log("[core] started init as task ", init->id, " with the framebuffer, PS/2 ports, keyboard and mouse irqs",
-        storage ? " and the disk controller" : "");
+        storage ? ", the disk controller" : "", network ? ", the network card" : "");
 }
 
 } // namespace

@@ -38,6 +38,13 @@ void init() {
     write(SLAVE_DATA, 0xFF);
 }
 
+void setLevelTriggered(u8 irq) {
+    if (irq < 3 or irq >= 16 or irq == 8 or irq == 13)
+        return; // timer, keyboard, cascade, clock and FPU lines must stay edge-triggered
+    u16 port = irq < 8 ? 0x4D0 : 0x4D1;
+    outb(port, static_cast<u8>(inb(port) | (1 << (irq & 7))));
+}
+
 void unmask(u8 irq) {
     u16 port = irq < 8 ? MASTER_DATA : SLAVE_DATA;
     outb(port, inb(port) & ~(1 << (irq % 8)));

@@ -8,20 +8,21 @@ using Protocol::Shell::Type;
 
 namespace {
 
-void copyTitle(char* dest, char const* src) {
+void copyTitle(char* dest, char const* src, unsigned capacity = sizeof(Message::title)) {
     unsigned i = 0;
-    for (; src[i] and i + 1 < sizeof(Message::title); i++)
+    for (; src[i] and i + 1 < capacity; i++)
         dest[i] = src[i];
     dest[i] = '\0';
 }
 
 } // namespace
 
-bool Window::open(char const* title, int width, int height, Sys::Handle shell) {
+bool Window::open(char const* title, int width, int height, Sys::Handle shell, bool resizable) {
     _shell = Channel(shell);
 
     Sys::SystemInfo info;
     Sys::systemInfo(info);
+    _format = {info.redShift, info.greenShift, info.blueShift};
 
     long memory = Sys::memoryCreate(static_cast<unsigned long>(width) * height * 4);
     if (memory < 0)
@@ -35,6 +36,7 @@ bool Window::open(char const* title, int width, int height, Sys::Handle shell) {
     create.type = Type::CreateWindow;
     create.w = width;
     create.h = height;
+    create.pressed = resizable;
     copyTitle(create.title, title);
     // The memory handle moves to the shell; our mapping stays.
     if (_shell.send(create, static_cast<Sys::Handle>(memory)) != Sys::OK)
@@ -44,11 +46,51 @@ bool Window::open(char const* title, int width, int height, Sys::Handle shell) {
         Message reply;
         if (_shell.recv(reply) != Sys::OK)
             return false;
+        if (reply.type == Type::Argument)
+            copyTitle(_argument, reply.title);
         if (reply.type == Type::Opened)
             return true;
         if (reply.type == Type::Close)
             return false;
     }
+}
+
+// New pixels of the new size, handed to the shell; the old ones go.
+bool Window::resize(int width, int height) {
+    if (width <= 0 or height <= 0 or (width == _surface.width and height == _surface.height))
+        return false;
+    long memory = Sys::memoryCreate(static_cast<unsigned long>(width) * height * 4);
+    if (memory < 0)
+        return false;
+    auto* pixels = static_cast<unsigned*>(Sys::memoryMap(memory));
+    if (not pixels) {
+        Sys::close(memory);
+        return false;
+    }
+    Message message{};
+    message.type = Type::Resize;
+    message.w = width;
+    message.h = height;
+    if (_shell.send(message, static_cast<Sys::Handle>(memory)) != Sys::OK) {
+        Sys::memoryUnmap(pixels);
+        Sys::close(memory);
+        return false;
+    }
+    Sys::memoryUnmap(_surface.pixels); // (the shell keeps its own mapping until it switches)
+    _surface = {pixels, width, height, width, _format};
+    return true;
+}
+
+void Window::launch(char const* program, char const* argument) {
+    Message message{};
+    message.type = Type::Launch;
+    unsigned i = 0;
+    for (; program[i] and i + 1 < Protocol::Shell::LAUNCH_ARGUMENT; i++)
+        message.title[i] = program[i];
+    copyTitle(message.title + Protocol::Shell::LAUNCH_ARGUMENT, argument,
+              sizeof(message.title) - Protocol::Shell::LAUNCH_ARGUMENT);
+    message.title[sizeof(message.title) - 1] = '\0';
+    _shell.send(message);
 }
 
 void Window::present(Gfx::Rect area) {
@@ -103,6 +145,15 @@ bool Window::waitEvent(WindowEvent& event, unsigned long timeoutMs) {
         case Type::MouseDown: event.kind = WindowEvent::MouseDown; return true;
         case Type::MouseUp: event.kind = WindowEvent::MouseUp; return true;
         case Type::Close: event.kind = WindowEvent::Close; return true;
+        case Type::Wheel:
+            event.kind = WindowEvent::Wheel;
+            event.wheel = m.h;
+            return true;
+        case Type::ResizeRequest:
+            if (not resize(m.w, m.h))
+                continue;
+            event.kind = WindowEvent::Resize;
+            return true;
         case Type::Key:
             event.kind = WindowEvent::Key;
             event.character = m.character;

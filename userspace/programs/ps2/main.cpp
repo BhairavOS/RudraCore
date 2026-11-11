@@ -109,7 +109,20 @@ bool setupController() {
     writeData(static_cast<unsigned char>(config));
     command(CMD_ENABLE_KEYBOARD);
 
-    return mouseCommand(MOUSE_SET_DEFAULTS) and mouseCommand(MOUSE_ENABLE_REPORTING);
+    return mouseCommand(MOUSE_SET_DEFAULTS);
+}
+
+// The IntelliMouse "knock": sample rates 200, 100, 80 in a row switch a
+// wheel mouse to 4-byte packets, and it then reports ID 3.
+bool enableWheel() {
+    static constexpr unsigned char RATES[] = {200, 100, 80};
+    for (unsigned char rate : RATES) {
+        if (not mouseCommand(0xF3) or not mouseCommand(rate))
+            return false;
+    }
+    if (not mouseCommand(0xF2)) // get ID
+        return false;
+    return readData() == 3;
 }
 
 struct Keyboard {
@@ -124,16 +137,30 @@ struct Keyboard {
         }
         bool pressed = not(byte & 0x80);
         unsigned char code = byte & 0x7F;
-        if (extended) { // arrows, right ctrl...: not mapped yet
+        event = {};
+        event.type = InputType::Key;
+        event.pressed = pressed;
+
+        if (extended) {
             extended = false;
-            return false;
+            if (code == LEFT_SHIFT or code == RIGHT_SHIFT)
+                return false; // fake shifts some keyboards send around Print Screen
+            if (code == 0x1C) { // keypad Enter
+                event.scancode = code;
+                event.character = '\n';
+            } else if (code == 0x35) { // keypad /
+                event.scancode = code;
+                event.character = '/';
+            } else if (code == 0x1D or code == 0x38) { // right Ctrl / Alt: same as left
+                event.scancode = code;
+            } else {
+                event.scancode = static_cast<unsigned char>(0x80 | code); // arrows, Home, Page Up...
+            }
+            return true;
         }
         if (code == LEFT_SHIFT or code == RIGHT_SHIFT)
             shift = pressed;
 
-        event = {};
-        event.type = InputType::Key;
-        event.pressed = pressed;
         event.scancode = code;
         event.character = code < TABLE_SIZE ? (shift ? SHIFTED[code] : NORMAL[code]) : 0;
         return true;
@@ -141,15 +168,17 @@ struct Keyboard {
 };
 
 struct Mouse {
-    unsigned char packet[3];
+    unsigned char packet[4];
     int index = 0;
+    int size = 3; // 4 with a wheel
 
-    // Mouse packets are 3 bytes: flags, dx, dy (9-bit signed, y up).
+    // Mouse packets are 3 bytes: flags, dx, dy (9-bit signed, y up), plus
+    // the wheel (4-bit signed) on an IntelliMouse.
     bool feed(unsigned char byte, InputEvent& event) {
         if (index == 0 and not(byte & 0x08))
             return false; // out of sync: bit 3 of the first byte is always set
         packet[index++] = byte;
-        if (index < 3)
+        if (index < size)
             return false;
         index = 0;
 
@@ -164,6 +193,10 @@ struct Mouse {
         event.buttons = flags & 0x07;
         event.dx = static_cast<short>(dx);
         event.dy = static_cast<short>(-dy);
+        if (size == 4) {
+            int z = packet[3] & 0x0F;
+            event.wheel = static_cast<signed char>(z >= 8 ? z - 16 : z);
+        }
         return true;
     }
 };
@@ -179,10 +212,16 @@ int main() {
     Sys::irqBind(MOUSE_IRQ, irqSender.handle(), MOUSE_IRQ);
 
     bool mouseOk = setupController();
-    Sys::log(mouseOk ? "ready: keyboard and mouse" : "ready: keyboard (no mouse answered)");
+    Mouse mouse;
+    bool wheel = mouseOk and enableWheel();
+    if (wheel)
+        mouse.size = 4;
+    if (mouseOk)
+        mouseOk = mouseCommand(MOUSE_ENABLE_REPORTING);
+    Sys::log(not mouseOk ? "ready: keyboard (no mouse answered)"
+                         : wheel ? "ready: keyboard and wheel mouse" : "ready: keyboard and mouse");
 
     Keyboard keyboard;
-    Mouse mouse;
 
     for (;;) {
         Sys::IrqMessage irq;

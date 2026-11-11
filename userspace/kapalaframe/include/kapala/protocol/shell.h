@@ -7,11 +7,15 @@
 // maps the same memory and composes it on screen.
 //
 //   app                                 shell
-//   CreateWindow(w, h, title) + memory ->
+//   CreateWindow(w, h, title, pressed: resizable) + memory ->
+//                                    <- Argument (if it was launched with one)
 //                                    <- Opened
 //   (draws into the memory)
 //   Present(rect)                   ->   (copies that part to the screen)
-//                                    <- MouseMove / MouseDown / MouseUp / Key / Focus
+//                                    <- MouseMove / MouseDown / MouseUp / Wheel / Key / Focus
+//                                    <- ResizeRequest(w, h): the user resized or maximized it
+//   Resize(w, h) + new memory       ->   (the window now uses the new pixels)
+//   Launch(program, argument)       ->   (starts another app)
 //                                    <- Close (the user clicked x)
 //   (exits: the channel closes and the window goes away)
 
@@ -19,9 +23,11 @@ namespace Kapala::Protocol::Shell {
 
 enum class Type : unsigned char {
     // App -> shell
-    CreateWindow = 1, // w, h, title; attached: shared memory of w * h * 4 bytes (the pixels)
+    CreateWindow = 1, // w, h, title, pressed: resizable; attached: shared memory of w * h * 4 bytes
     Present = 2,      // x, y, w, h: this part of the window changed
     SetTitle = 3,     // title
+    Resize = 4,       // w, h; attached: shared memory with the new pixels
+    Launch = 5,       // title: program name (up to 15 characters), argument at title + 16
 
     // Shell -> app
     Opened = 10,
@@ -31,7 +37,12 @@ enum class Type : unsigned char {
     Key = 14,       // character, scancode, pressed
     Close = 15,     // the user asked to close the window
     Focus = 16,     // pressed: whether the window now has the keyboard
+    Wheel = 17,     // x, y; h: wheel steps (positive: scroll down)
+    ResizeRequest = 18, // w, h: the content size the user wants
+    Argument = 19,      // title: what the app was launched with (e.g. a file path)
 };
+
+constexpr unsigned LAUNCH_ARGUMENT = 16; // where Launch's argument starts in title
 
 struct Message {
     Type type;
@@ -40,7 +51,7 @@ struct Message {
     unsigned char scancode;
     int x, y, w, h;
     unsigned buttons;
-    char title[48];
+    char title[96];
 };
 
 static_assert(sizeof(Message) <= 128, "must fit in a channel message");

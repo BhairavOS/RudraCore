@@ -53,7 +53,8 @@ switch ($Command) {
         }
         if ($qemu) {
             $qemuArgs = @("-M", "q35", "-m", "256M", "-cdrom", "$Root\build\bhairavos.iso", "-boot", "d", "-serial", "stdio",
-                          "-drive", "file=$Root\disk.img,format=raw,if=none,id=disk", "-device", "ide-hd,drive=disk,bus=ide.0")
+                          "-drive", "file=$Root\disk.img,format=raw,if=none,id=disk", "-device", "ide-hd,drive=disk,bus=ide.0",
+                          "-netdev", "user,id=net", "-device", "e1000,netdev=net")
             if ($uefi) {
                 # QEMU for Windows ships UEFI firmware (EDK2) next to the program.
                 $firmware = Join-Path (Split-Path $qemu) "share\edk2-x86_64-code.fd"

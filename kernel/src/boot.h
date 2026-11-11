@@ -50,7 +50,7 @@ struct Module {
 // boot protocol (Limine today, ShoolLoader later).
 struct Info {
     static constexpr usize MAX_REGIONS = 256;
-    static constexpr usize MAX_MODULES = 16;
+    static constexpr usize MAX_MODULES = 32;
 
     bool protocolSupported;
     char loaderName[64];
