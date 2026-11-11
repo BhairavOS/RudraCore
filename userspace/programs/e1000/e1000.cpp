@@ -5,7 +5,7 @@ void* memcpy(void* dest, void const* src, unsigned long n);
 void* memset(void* dest, int value, unsigned long n);
 }
 
-namespace Net {
+namespace Driver {
 
 namespace Sys = Kapala::Sys;
 
@@ -139,4 +139,4 @@ bool E1000::send(u8 const* frame, u32 length) {
     return true;
 }
 
-} // namespace Net
+} // namespace Driver

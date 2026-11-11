@@ -4,7 +4,7 @@
 // resolver and TCP (client connections). Single-threaded: the server's
 // loop feeds it frames and calls tick() regularly for its timers.
 
-#include "e1000.h"
+#include "link.h"
 
 namespace Net {
 
@@ -15,7 +15,7 @@ struct Config {
 
 extern Config config;
 
-void init(E1000& nic);
+void init(Link& link);
 void receiveFrame(u8 const* frame, u32 length);
 void tick(); // retries and timeouts; call at least every few milliseconds
 

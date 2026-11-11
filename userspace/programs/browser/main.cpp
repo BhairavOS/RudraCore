@@ -13,6 +13,7 @@
 #include "http.h"
 #include "url.h"
 
+#include <kapala/image.h>
 #include <kapala/net.h>
 #include <kapala/protocol/input.h>
 #include <kapala/sys.h>
@@ -33,6 +34,17 @@ constexpr int SCROLLBAR_W = 12;
 constexpr int PAD_X = 28, PAD_Y = 18;
 constexpr int MAX_HISTORY = 32;
 constexpr int MAX_REDIRECTS = 6;
+constexpr int MAX_IMAGES = 48;     // pictures loaded per page
+constexpr u64 MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+// A picture of the current page.
+struct CachedImage {
+    enum State : u8 { Pending, Ready, Failed };
+    char url[Url::MAX_HOST + Url::MAX_PATH + 16];
+    State state = Pending;
+    Kapala::Image image; // as decoded
+    Kapala::Image shown; // scaled to the size it's shown at
+};
 
 constexpr Rect BACK{10, 8, 34, 32};
 constexpr Rect RELOAD{48, 8, 34, 32};
@@ -58,7 +70,8 @@ char const HOME_PAGE[] = R"(<title>Bhairav Browser</title>
 <li><a href="http://info.cern.ch/hypertext/WWW/TheProject.html">The World Wide Web project</a> - the first website (CERN, 1991)</li>
 <li><a href="http://frogfind.com/">FrogFind</a> - a search engine that simplifies pages for small browsers</li>
 <li><a href="http://68k.news/">68k.news</a> - today's headlines, made for vintage computers</li>
-<li><a href="http://example.com/">example.com</a> - the classic example page</li>
+<li><a href="https://en.wikipedia.org/wiki/Bhairava">Wikipedia: Bhairava</a> - over HTTPS</li>
+<li><a href="https://example.com/">example.com</a> - the classic example page</li>
 <li><a href="http://neverssl.com/">NeverSSL</a> - a site that always stays on plain HTTP</li>
 </ul>
 <h3>Keys</h3>
@@ -67,9 +80,10 @@ char const HOME_PAGE[] = R"(<title>Bhairav Browser</title>
 <li>Ctrl+L: type an address; F5: reload; Backspace: go back</li>
 </ul>
 <h3>What works</h3>
-<p>Bhairav Browser reads <b>HTTP</b> pages: text, headings, lists, links and simple tables.
-Pictures show as their description, and scripts don't run.
-Encrypted <b>HTTPS</b> sites aren't supported yet: for those it offers a simplified copy through FrogFind.</p>
+<p>Bhairav Browser reads <b>HTTP</b> and <b>HTTPS</b> pages (TLS 1.3): text, headings, lists, links,
+simple tables and pictures. Scripts don't run, and page styles are ignored.</p>
+<p><b>Note:</b> HTTPS connections are encrypted, but the site's certificate isn't checked yet,
+so the browser can't be sure it's talking to the real site. Don't type passwords.</p>
 <hr>
 <p><small>Bhairav OS, built from scratch: ShoolLoader, RudraCore, Kapalaframe and KamalShell.</small></p>
 )";
@@ -93,8 +107,11 @@ public:
     int run() {
         for (;;) {
             WindowEvent e;
-            if (not _window.waitEvent(e, 500)) {
-                if (_editing) {
+            bool loading = nextPendingImage() >= 0;
+            if (not _window.waitEvent(e, loading ? 0 : 500)) {
+                if (loading) {
+                    loadNextImage(); // one at a time, so events still get through
+                } else if (_editing) {
                     _caret = not _caret;
                     redraw();
                 }
@@ -171,10 +188,6 @@ private:
                 setStatus("Ready");
                 return;
             }
-            if (url.isHttps()) {
-                showHttps(url, remember);
-                return;
-            }
             if (not _netOk) {
                 showMessage("No network", "Bhairav OS has no network connection.", _address);
                 return;
@@ -184,7 +197,10 @@ private:
             setStatus("Loading...");
             fetch(_net, url, _response, [](char const* message) { current->setStatus(message); });
             if (_response.error != Sys::OK) {
-                showError(url, _response.error);
+                if (url.isHttps() and _response.security[0])
+                    showHttps(url, remember, _response.security); // the TLS handshake failed
+                else
+                    showError(url, _response.error);
                 return;
             }
 
@@ -213,6 +229,8 @@ private:
                 .add(Sys::timeMs() - started).add(" ms");
             if (_response.status != 200)
                 status.add(" (HTTP ").add(_response.status).add(")");
+            if (url.isHttps())
+                status.add("  |  encrypted: ").add(_response.security).add(" - the site's certificate isn't checked yet");
             setStatus(status.cstr());
             return;
         }
@@ -235,8 +253,9 @@ private:
         _source.append(source, length);
         _source.push('\0');
         _plain = plain;
-        _doc.clear();
-        layout(_source.data(), length, plain, PAGE.w - 2 * PAD_X, _doc);
+        forgetImages();
+        relayout();
+        queueImages();
         _scroll = 0;
 
         Text<160> title;
@@ -288,8 +307,8 @@ private:
         showMessage("Couldn't load the page", why, address);
     }
 
-    // HTTPS needs TLS, which isn't here yet: offer the alternatives.
-    void showHttps(Url const& url, bool remember) {
+    // A secure connection couldn't be made: say why, offer alternatives.
+    void showHttps(Url const& url, bool remember, char const* reason) {
         char address[Url::MAX_HOST + Url::MAX_PATH + 16];
         url.format(address, sizeof(address));
         char encoded[1600];
@@ -297,10 +316,12 @@ private:
 
         Vector<char> page;
         auto add = [&](char const* s) { page.append(s, length(s)); };
-        add("<title>Encrypted site</title><h2>This site uses HTTPS</h2>");
+        add("<title>Secure connection failed</title><h2>Couldn't make a secure connection</h2>");
         add("<p><code>");
         add(address);
-        add("</code></p><p>Bhairav Browser can't open encrypted (HTTPS) connections yet. You can:</p><ul>");
+        add("</code></p><p>Reason: ");
+        add(reason);
+        add(".</p><p>Bhairav Browser speaks TLS 1.3 with X25519 keys, which most sites support. You can:</p><ul>");
         add("<li><a href=\"http://frogfind.com/read.php?a=");
         add(encoded);
         add("\">Read a simplified copy through FrogFind</a>. FrogFind, a third-party service, fetches the page for you over HTTPS and sends back plain HTML.</li>");
@@ -309,8 +330,127 @@ private:
         add(url.path);
         add("\">Try the plain HTTP address</a>. Many sites redirect straight back to HTTPS.</li></ul>");
         add("<p><a href=\"about:home\">Go to the start page</a></p>");
+        _remember = remember;
         show(url, page.data(), page.size(), false, remember);
-        setStatus("HTTPS isn't supported yet");
+        setStatus("Secure connection failed");
+    }
+
+    // MARK: Pictures
+
+    // The page's layout, knowing the sizes of the pictures loaded so far.
+    void relayout() {
+        _doc.clear();
+        layout(_source.data(), _source.size() ? _source.size() - 1 : 0, _plain, PAGE.w - 2 * PAD_X, _doc,
+               [](char const* src, int& w, int& h) {
+                   int i = current->findImage(src);
+                   if (i < 0 or current->_images[i].state != CachedImage::Ready)
+                       return false;
+                   w = current->_images[i].image.width;
+                   h = current->_images[i].image.height;
+                   return true;
+               });
+    }
+
+    void forgetImages() {
+        for (int i = 0; i < _imageCount; i++)
+            _images[i] = CachedImage{};
+        _imageCount = 0;
+    }
+
+    // The cache slot for a picture address as written on the page, or -1.
+    int findImage(char const* src) {
+        Url u;
+        if (not u.resolve(_url, src))
+            return -1;
+        char address[sizeof(CachedImage::url)];
+        u.format(address, sizeof(address));
+        for (int i = 0; i < _imageCount; i++) {
+            if (equals(_images[i].url, address))
+                return i;
+        }
+        return -1;
+    }
+
+    void queueImages() {
+        for (u64 k = 0; k < _doc.images.size() and _imageCount < MAX_IMAGES; k++) {
+            char const* src = _doc.at(_doc.images[k].src);
+            if (findImage(src) >= 0)
+                continue;
+            Url u;
+            if (not u.resolve(_url, src) or u.isAbout())
+                continue;
+            CachedImage& slot = _images[_imageCount++];
+            slot = CachedImage{};
+            u.format(slot.url, sizeof(slot.url));
+        }
+    }
+
+    int nextPendingImage() const {
+        for (int i = 0; i < _imageCount; i++) {
+            if (_images[i].state == CachedImage::Pending)
+                return i;
+        }
+        return -1;
+    }
+
+    void loadNextImage() {
+        int i = nextPendingImage();
+        if (i < 0)
+            return;
+        CachedImage& slot = _images[i];
+        slot.state = CachedImage::Failed;
+        int done = 0;
+        for (int k = 0; k < _imageCount; k++)
+            done += _images[k].state != CachedImage::Pending;
+        Text<120> status;
+        status.add("Loading pictures: ").add(done).add(" of ").add(_imageCount);
+        setStatus(status.cstr());
+
+        Url url;
+        if (not url.parse(slot.url) or not _netOk)
+            return finishImages();
+        for (int redirects = 0; redirects < 4; redirects++) {
+            fetch(_net, url, _response, [](char const*) {});
+            if (_response.error != Sys::OK)
+                return finishImages();
+            if (_response.status >= 300 and _response.status < 400 and _response.location[0]) {
+                Url next;
+                if (not next.resolve(url, _response.location))
+                    return finishImages();
+                url = next;
+                continue;
+            }
+            break;
+        }
+        u64 length = _response.body.size() ? _response.body.size() - 1 : 0;
+        if (_response.status == 200 and length and length <= MAX_IMAGE_BYTES and
+            Kapala::Image::decode(reinterpret_cast<unsigned char const*>(_response.body.data()), length, slot.image,
+                                  8 * 1024 * 1024)) {
+            slot.state = CachedImage::Ready;
+            int oldHeight = _doc.height > 0 ? _doc.height : 1;
+            int scroll = _scroll;
+            relayout();
+            _scroll = -1;
+            setScroll(scroll == 0 ? 0 : static_cast<int>(static_cast<long>(scroll) * _doc.height / oldHeight));
+        }
+        finishImages();
+    }
+
+    void finishImages() {
+        if (nextPendingImage() >= 0) {
+            redraw();
+            return;
+        }
+        int ready = 0;
+        for (int k = 0; k < _imageCount; k++)
+            ready += _images[k].state == CachedImage::Ready;
+        if (_imageCount) {
+            Text<200> status;
+            status.add("Done: ").add(ready).add(ready == 1 ? " picture" : " pictures");
+            if (ready < _imageCount)
+                status.add(" (").add(_imageCount - ready).add(" in formats not supported yet, or missing)");
+            setStatus(status.cstr());
+        }
     }
 
     // Lays the page out again for the new width, keeping the reading position.
@@ -319,8 +459,7 @@ private:
         int scroll = _scroll;
         updateLayout(_window.width(), _window.height());
         if (not _source.empty()) {
-            _doc.clear();
-            layout(_source.data(), _source.size() - 1, _plain, PAGE.w - 2 * PAD_X, _doc);
+            relayout();
         }
         int target = static_cast<int>(static_cast<long>(scroll) * _doc.height / oldHeight);
         _scroll = -1; // so setScroll always applies (and clamps) it
@@ -518,7 +657,6 @@ private:
         c.clip = PAGE;
         c.fill(PAGE, Colors::PAPER);
         int originX = PAGE.x + PAD_X, originY = PAGE.y + PAD_Y - _scroll;
-        char buffer[512];
         for (u64 i = 0; i < _doc.runs.size(); i++) {
             Run const& r = _doc.runs[i];
             int y = originY + r.y;
@@ -533,13 +671,13 @@ private:
                 c.fillCircle(static_cast<float>(x + 3), static_cast<float>(y + 9), 2.6f, r.color);
                 continue;
             }
-            u64 n = r.length < sizeof(buffer) - 1 ? r.length : sizeof(buffer) - 1;
-            memcpy(buffer, _doc.text.data() + r.start, n);
-            buffer[n] = '\0';
+            if (r.kind == RunKind::Image) {
+                drawImage(c, r, x, y);
+                continue;
+            }
             Color color = r.link >= 0 and r.link == _hoverLink ? Colors::HEADING : r.color;
-            c.text({x, y}, buffer, color, r.scale);
-            if (r.bold)
-                c.text({x + 1, y}, buffer, color, r.scale);
+            Font const& font = fontFor(r.font);
+            c.text({x, y}, _doc.text.data() + r.start, r.length, color, font);
             if (r.underline)
                 c.fill({x, y + r.h - 1, r.w, r.link == _hoverLink ? 2 : 1}, color.withAlpha(150));
         }
@@ -590,6 +728,35 @@ private:
         _window.present();
     }
 
+    void drawImage(Canvas& c, Run const& r, int x, int y) {
+        PageImage const& pi = _doc.images[static_cast<u64>(r.image)];
+        int i = findImage(_doc.at(pi.src));
+        if (i >= 0 and _images[i].state == CachedImage::Ready) {
+            CachedImage& slot = _images[i];
+            Kapala::Image const* draw = &slot.image;
+            if (slot.image.width != r.w or slot.image.height != r.h) {
+                if (slot.shown.width != r.w or slot.shown.height != r.h)
+                    slot.image.scaled(r.w, r.h, slot.shown);
+                draw = &slot.shown;
+            }
+            if (draw->pixels)
+                c.image({x, y}, draw->pixels, draw->width, draw->height);
+            if (r.link >= 0 and r.link == _hoverLink)
+                c.strokeRounded({x - 2, y - 2, r.w + 4, r.h + 4}, 3, 2, Colors::LINK);
+            return;
+        }
+        // Not here (yet): a placeholder with the description.
+        c.fillRounded({x, y, r.w, r.h}, 4, Color::hex(0xEDE7F2));
+        c.strokeRounded({x, y, r.w, r.h}, 4, 1, Colors::RULE);
+        char const* alt = _doc.at(pi.alt);
+        if (alt[0] and r.w > 40 and r.h > 24) {
+            Rect saved = c.clip;
+            c.clip = c.clip.intersect({x + 4, y + 4, r.w - 8, r.h - 8});
+            c.paragraph({x + 8, y + 6, r.w - 16, r.h - 12}, alt, Colors::DIM, 18);
+            c.clip = saved;
+        }
+    }
+
     void button(Canvas& c, Rect r, char const* label, bool enabled) {
         c.fillRounded(r, 8, Theme::SURFACE_ALT);
         Font const& font = Font::system();
@@ -607,6 +774,8 @@ private:
     char _address[Url::MAX_HOST + Url::MAX_PATH + 16] = {};
 
     Response _response;
+    CachedImage* _images = new CachedImage[MAX_IMAGES];
+    int _imageCount = 0;
     Vector<char> _source;
     bool _plain = false;
     Document _doc;

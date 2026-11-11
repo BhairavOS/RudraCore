@@ -5,7 +5,7 @@
 
 #include <kapala/sys.h>
 
-namespace Net {
+namespace Driver {
 
 using u8 = unsigned char;
 using u16 = unsigned short;
@@ -83,4 +83,4 @@ private:
     u8 _mac[6] = {};
 };
 
-} // namespace Net
+} // namespace Driver

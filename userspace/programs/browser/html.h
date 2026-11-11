@@ -11,22 +11,39 @@
 
 namespace Browser {
 
-enum class RunKind : u8 { Text, Rule, Bullet };
+enum class RunKind : u8 { Text, Rule, Bullet, Image };
+
+// The page's fonts.
+enum FontId : u8 { BODY, BODY_BOLD, MONO, MONO_BOLD, H1, H2, H3, FONT_COUNT };
+Kapala::Gfx::Font const& fontFor(u8 id);
 
 struct Run {
     int x, y, w, h;
-    u32 start, length; // text in Document::text
+    u32 start, length; // UTF-8 text in Document::text
     RunKind kind;
-    u8 scale;
+    u8 font;           // FontId
     bool bold, underline;
     Kapala::Gfx::Color color;
     int link; // index into Document::links, or -1
+    int image; // Image runs: index into Document::images
 };
+
+// A picture on the page.
+struct PageImage {
+    u32 src;         // offset of its (unresolved) address in Document::text
+    u32 alt;         // offset of its description
+    int width, height; // from its attributes (0: not given)
+};
+
+// Tells the layout how big a picture is once it has loaded (natural size),
+// given its address as written on the page. False while unknown.
+using ImageSize = bool (*)(char const* src, int& width, int& height);
 
 struct Document {
     Vector<Run> runs;
     Vector<char> text;
     Vector<u32> links; // offsets of 0-terminated hrefs in `text`
+    Vector<PageImage> images;
     char title[128] = {};
     int height = 0;
 
@@ -34,15 +51,17 @@ struct Document {
         runs.clear();
         text.clear();
         links.clear();
+        images.clear();
         title[0] = '\0';
         height = 0;
     }
 
     char const* href(int link) const { return text.data() + links[static_cast<u64>(link)]; }
+    char const* at(u32 offset) const { return text.data() + offset; }
 };
 
 // Lays out `source` for a page `width` pixels wide.
-void layout(char const* source, u64 length, bool plainText, int width, Document& out);
+void layout(char const* source, u64 length, bool plainText, int width, Document& out, ImageSize sizes = nullptr);
 
 namespace Colors {
 constexpr auto PAPER = Kapala::Gfx::Color::hex(0xFBF8F3);

@@ -5,6 +5,7 @@
 #include "core/channel.h"
 #include "core/device.h"
 #include "core/programs.h"
+#include "core/random.h"
 #include "core/sched.h"
 #include "core/shared_memory.h"
 #include "core/time.h"
@@ -169,6 +170,38 @@ Arch::Frame* sysSystemInfo(Call const& c, Boot::Info const& boot) {
     }
     memcpy(reinterpret_cast<void*>(address), &info, sizeof(info));
     return c.result(Abi::OK);
+}
+
+Arch::Frame* sysRandom(Call const& c) {
+    u64 address = c.arg0(), length = c.arg1();
+    if (length > 256)
+        return c.result(Abi::INVALID_ARGUMENT);
+    if (not c.userMemory(address, length, true))
+        return c.result(Abi::BAD_ADDRESS);
+    Random::fill(reinterpret_cast<u8*>(address), length);
+    return c.result(Abi::OK);
+}
+
+// A data file from the boot image, shared read-only by everyone who opens it.
+Arch::Frame* sysFileOpen(Call const& c) {
+    char name[32];
+    u64 length = c.arg1();
+    if (length == 0 or length >= sizeof(name))
+        return c.result(Abi::INVALID_ARGUMENT);
+    if (not c.userMemory(c.arg0(), length))
+        return c.result(Abi::BAD_ADDRESS);
+    memcpy(name, reinterpret_cast<void const*>(c.arg0()), length);
+    name[length] = '\0';
+    Core::SharedMemory* memory = Programs::file(name);
+    if (not memory)
+        return c.result(Abi::NOT_FOUND);
+    memory->ref();
+    u64 handle = c.task->addHandle(memory);
+    if (not handle) {
+        memory->unref();
+        return c.result(Abi::NO_SPACE);
+    }
+    return c.result(static_cast<i64>(handle));
 }
 
 // MARK: Handles and channels
@@ -388,7 +421,7 @@ Arch::Frame* sysMemoryMap(Call const& c) {
     if (not slot or address + memory->size > MAP_LIMIT)
         return c.result(Abi::NO_SPACE);
 
-    u32 access = Vmm::USER | Vmm::WRITE; // not OWNED: the object owns the pages
+    u32 access = Vmm::USER | (memory->readOnly ? 0 : Vmm::WRITE); // not OWNED: the object owns the pages
     if (not c.task->space->map(address, memory->physical, memory->size, access, memory->cache)) {
         c.task->space->unmap(address, memory->size);
         return c.result(Abi::OUT_OF_MEMORY);
@@ -583,6 +616,8 @@ Arch::Frame* dispatch(Arch::Frame* frame) {
     case Abi::SYS_TIME: return c.result(static_cast<i64>(Time::now()));
     case Abi::SYS_SPAWN: return sysSpawn(c);
     case Abi::SYS_SYSTEM_INFO: return sysSystemInfo(c, *bootInfo);
+    case Abi::SYS_RANDOM: return sysRandom(c);
+    case Abi::SYS_FILE_OPEN: return sysFileOpen(c);
 
     case Abi::SYS_HANDLE_CLOSE: return sysHandleClose(c);
     case Abi::SYS_CHANNEL_CREATE: return sysChannelCreate(c);

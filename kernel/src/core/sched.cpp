@@ -1,3 +1,4 @@
+#include "core/random.h"
 #include "core/sched.h"
 
 #include "arch/x86_64/cpu.h"
@@ -287,6 +288,7 @@ Arch::Frame* switchFrom(Arch::Frame* frame) {
 
 Arch::Frame* onTimerTick(Arch::Frame* frame) {
     Time::tick();
+    Random::stir();
     u64 now = Time::now();
     wakeSleepers(now);
 

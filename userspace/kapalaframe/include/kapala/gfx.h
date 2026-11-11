@@ -99,16 +99,43 @@ struct Bitmap {
 
 // MARK: Text
 
-// The built-in 8x16 bitmap font (Terminus), drawn at integer scales.
+// Fonts: smooth, anti-aliased faces rendered from DejaVu (the "fonts" file
+// in the boot image, shared by every program), with the built-in 8x16
+// bitmap font (Terminus) as a fallback. Text is UTF-8.
+//
+//   Font::system()       the interface font (sans, 13 px)
+//   Font::bold()         bold interface text
+//   Font::mono()         fixed width, for terminals and code (13 px)
+//   Font::get("sans-bold", 22)  any face: sans, sans-bold, mono, mono-bold;
+//                               the nearest size available
 struct Font {
-    int width = 8;
-    int height = 16;
+    int width = 8;   // monospace: every character's advance; otherwise a typical one
+    int height = 16; // a line's height (ascent + descent)
+    int ascent = 12; // from the top of the line to the baseline
+    int size = 16;   // in pixels
 
     static Font const& system();
+    static Font const& bold();
+    static Font const& mono();
+    static Font const& get(char const* face, int size);
 
-    unsigned char const* glyph(char c) const;
+    // Width in pixels of UTF-8 text (or of the first `bytes` bytes).
     int measure(char const* text, int scale = 1) const;
+    int measure(char const* text, unsigned long bytes, int scale) const;
+
+    bool smooth() const { return _face != nullptr; }
+    bool monospace() const { return _monospace; }
+
+    // The bitmap font's 16 rows for a character (fallback only).
+    unsigned char const* glyph(char c) const;
+
+    // (internal)
+    void const* _face = nullptr;
+    bool _monospace = false;
 };
+
+// Decodes one UTF-8 character at *text and moves past it.
+unsigned decodeUtf8(char const*& text);
 
 // MARK: Canvas
 
@@ -137,7 +164,11 @@ public:
     void lotus(float cx, float baseY, float size, unsigned char alpha = 255);
 
     // Draws text with its top-left corner at `at`. Returns the x after it.
+    // Scale 1 uses the interface font; 2 and up a large bold one.
     int text(Point at, char const* text, Color c, int scale = 1);
+    int text(Point at, char const* text, Color c, Font const& font);
+    // Just the first `bytes` bytes of text.
+    int text(Point at, char const* text, unsigned long bytes, Color c, Font const& font);
 
     // Draws text wrapped at word boundaries inside `box`. Returns the
     // height used.

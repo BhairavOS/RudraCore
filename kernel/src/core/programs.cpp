@@ -1,6 +1,9 @@
 #include "core/programs.h"
 
 #include "core/elf.h"
+#include "mem/memory.h"
+
+extern "C" void* memcpy(void* dest, void const* src, unsigned long n);
 
 namespace Rudracore::Programs {
 
@@ -28,6 +31,28 @@ void dropHandles(Core::Object* const* handles, usize count) {
 
 void init(Boot::Info const& info) {
     bootInfo = &info;
+}
+
+Core::SharedMemory* file(char const* name) {
+    static Core::SharedMemory* cache[Boot::Info::MAX_MODULES] = {};
+    for (usize i = 0; bootInfo and i < bootInfo->moduleCount; i++) {
+        Boot::Module const& module = bootInfo->modules[i];
+        usize n = 0;
+        while (name[n])
+            n++;
+        if (not nameEquals(module.name, name, n))
+            continue;
+        if (not cache[i]) {
+            Core::SharedMemory* memory = Core::SharedMemory::allocate(module.size);
+            if (not memory)
+                return nullptr;
+            memcpy(Mem::toVirtual<u8>(memory->physical), module.data, module.size);
+            memory->readOnly = true;
+            cache[i] = memory; // the cache keeps this first reference
+        }
+        return cache[i];
+    }
+    return nullptr;
 }
 
 Core::Task* start(char const* name, usize nameLength, Core::Object* const* handles,

@@ -848,7 +848,8 @@ private:
         c.text({w.frame.x + 16, w.frame.y + 9}, w.title, focused ? Theme::WHITE : Theme::TEXT_DIM);
         Rect x = w.closeButton();
         c.fillCircle(x.x + x.w / 2.0f, x.y + x.h / 2.0f, 9, Theme::WHITE.withAlpha(focused ? 220 : 90));
-        c.text({x.x + 7, x.y + 3}, "x", Theme::NIGHT);
+        Font const& markFont = Font::system();
+        c.text({x.x + (x.w - markFont.measure("\u00d7")) / 2, x.y + (x.h - markFont.height) / 2}, "\u00d7", Theme::NIGHT);
         if (w.resizable) {
             Rect m = w.maximizeButton();
             c.fillCircle(m.x + m.w / 2.0f, m.y + m.h / 2.0f, 9, Theme::WHITE.withAlpha(focused ? 150 : 60));

@@ -1,17 +1,13 @@
-// net: the network server. Drives the network card (e1000.cpp) and runs
-// the TCP/IP stack (stack.cpp), and serves programs over channels
-// (kapala/protocol/net.h).
+// net: the network server. Runs the TCP/IP stack (stack.cpp) on top of a
+// network card driver (e1000, rtl8139: separate programs, see link.h), and
+// serves programs over channels (kapala/protocol/net.h).
 //
 // Handles from init:
-//   1: the network card (PCI device)
+//   1: a channel to the card's driver (protocol/netdev.h)
 //   2: the connect channel: each message is a Connect with a new client's
 //      channel attached
-//   3: the card's interrupt line (optional: without it the card is polled)
-//
-// The card driver lives in the same program as the stack for speed; it
-// only talks to the stack through E1000::send and E1000::receive.
 
-#include "e1000.h"
+#include "link.h"
 #include "stack.h"
 
 #include <kapala/channel.h>
@@ -29,12 +25,11 @@ using Net::u8;
 
 namespace {
 
-constexpr Sys::Handle DEVICE = 1;
+constexpr Sys::Handle DRIVER = 1;
 constexpr Sys::Handle CONNECT = 2;
-constexpr Sys::Handle IRQ = 3;
 constexpr int MAX_CLIENTS = 16;
 
-Net::E1000 card;
+Net::Link link;
 bool cardReady = false;
 
 struct Client {
@@ -189,7 +184,7 @@ void handle(Client& c, Proto::Request const& q, Sys::Handle attached) {
         r.gateway = Net::config.gateway;
         r.dns = Net::config.dns;
         if (cardReady)
-            memcpy(r.mac, card.mac(), 6);
+            memcpy(r.mac, link.mac(), 6);
         reply(c, r);
         return;
     }
@@ -290,26 +285,14 @@ bool accept(Channel& connect) {
 int main() {
     Channel connect(CONNECT);
 
-    // Interrupts arrive as messages on `irqEvents`.
-    Channel irqEvents, irqSource;
-    bool haveIrq = false;
-    if (Channel::createPair(irqEvents, irqSource) == Sys::OK)
-        haveIrq = Sys::irqBind(IRQ, irqSource.handle(), 1) == Sys::OK;
-
-    cardReady = card.start(DEVICE);
+    cardReady = link.attach(DRIVER);
     if (cardReady) {
         Text<> text;
-        text.add("e1000 ready, mac ");
-        static constexpr char HEX[] = "0123456789abcdef";
-        for (int i = 0; i < 6; i++) {
-            char byte[3] = {HEX[card.mac()[i] >> 4], HEX[card.mac()[i] & 15], 0};
-            text.add(byte).add(i < 5 ? ":" : "");
-        }
-        text.add(card.linkUp() ? ", link up" : ", link down").add(haveIrq ? "" : ", polling (no interrupt)");
+        text.add("using the ").add(link.name()).add(" driver");
         Sys::log(text.cstr());
-        Net::init(card);
+        Net::init(link);
     } else {
-        Sys::log("no network card: the network is unavailable");
+        Sys::log("no network card driver: the network is unavailable");
     }
 
     bool listening = true;
@@ -317,8 +300,8 @@ int main() {
         Sys::Handle handles[2 + MAX_CLIENTS];
         int owners[2 + MAX_CLIENTS];
         unsigned long count = 0;
-        if (haveIrq) {
-            handles[count] = irqEvents.handle();
+        if (cardReady) {
+            handles[count] = link.channel();
             owners[count++] = -2;
         }
         if (listening) {
@@ -332,19 +315,18 @@ int main() {
             }
         }
 
-        // Timers (retransmits, DHCP, DNS retries) need a regular tick; a
-        // card without an interrupt needs polling.
-        long ready = count ? Sys::wait(handles, count, haveIrq ? 10 : 2) : Sys::TIMED_OUT;
+        // Timers (retransmits, DHCP, DNS retries) need a regular tick.
+        long ready = count ? Sys::wait(handles, count, 10) : Sys::TIMED_OUT;
         if (count == 0)
             Sys::sleep(10);
 
         if (ready >= 0) {
             int owner = owners[ready];
             if (owner == -2) {
-                Sys::IrqMessage message;
-                irqEvents.recv(message);
-                card.acknowledgeInterrupt(); // lowers the line
-                Sys::irqAck(IRQ);
+                if (not link.service()) {
+                    Sys::log("the network card driver stopped");
+                    cardReady = false;
+                }
             } else if (owner == -1) {
                 listening = accept(connect);
             } else {
@@ -353,12 +335,13 @@ int main() {
         }
 
         if (cardReady) {
-            card.receive([](u8 const* frame, u32 length) { Net::receiveFrame(frame, length); });
+            link.receive([](u8 const* frame, u32 length) { Net::receiveFrame(frame, length); });
             Net::tick();
         }
         for (auto& c : clients) {
             if (c.used and c.waiting)
                 progress(c);
         }
+        link.flush(); // wake the driver for whatever was sent above
     }
 }

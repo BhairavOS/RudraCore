@@ -78,7 +78,7 @@ SHOOL_CXXFLAGS := \
 # What goes on the boot media: stripped copies (the unstripped ELFs in
 # build/ keep their debug info for backtraces).
 BOOT_FILES := $(BUILD)/boot-files
-STRIPPED := $(BOOT_FILES)/rudracore.elf $(USER_PROGRAMS:%=$(BOOT_FILES)/%.elf)
+STRIPPED := $(BOOT_FILES)/rudracore.elf $(USER_PROGRAMS:%=$(BOOT_FILES)/%.elf) $(BOOT_FILES)/fonts.bin
 
 # The UEFI boot image: a FAT file system with ShoolLoader as the default
 # UEFI boot program, plus the kernel, programs and shool.cfg.
@@ -90,8 +90,12 @@ EFI_IMG := $(BUILD)/efiboot.img
 DISK := disk.img
 DISK_MB := 64
 
-QEMU_FLAGS := -M q35 -m 256M -cdrom $(ISO) -boot d 	-drive file=$(DISK),format=raw,if=none,id=disk -device ide-hd,drive=disk,bus=ide.0 \
-	-netdev user,id=net -device e1000,netdev=net
+# The network card QEMU emulates: e1000 (default) or rtl8139.
+NIC ?= e1000
+
+QEMU_FLAGS := -M q35 -m 256M -cdrom $(ISO) -boot d \
+	-drive file=$(DISK),format=raw,if=none,id=disk -device ide-hd,drive=disk,bus=ide.0 \
+	-netdev user,id=net -device $(NIC),netdev=net
 
 .PHONY: all kernel user shool iso disk run run-uefi shot clean FORCE
 
@@ -163,21 +167,30 @@ $(BOOT_FILES)/rudracore.elf: $(KERNEL)
 	@mkdir -p $(@D)
 	llvm-strip -o $@ $<
 
+# The fonts (made by scripts/make-fonts.py, see `make fonts`).
+$(BOOT_FILES)/fonts.bin: assets/fonts.bin
+	@mkdir -p $(@D)
+	cp $< $@
+
 $(BOOT_FILES)/%.elf: $(BUILD)/user/%.elf
 	@mkdir -p $(@D)
 	llvm-strip -o $@ $<
 
 $(EFI_IMG): $(SHOOL_EFI) $(STRIPPED) boot/shool.cfg
 	rm -f $@
-	dd if=/dev/zero of=$@ bs=1M count=8 status=none
-	mformat -i $@ -T 16384 -h 64 -s 32 -v BHAIRAV ::
+	dd if=/dev/zero of=$@ bs=1M count=16 status=none
+	mformat -i $@ -T 32768 -h 64 -s 32 -v BHAIRAV ::
 	mmd -i $@ ::/EFI ::/EFI/BOOT ::/boot
 	mcopy -i $@ $(SHOOL_EFI) ::/EFI/BOOT/BOOTX64.EFI
 	mcopy -i $@ $(STRIPPED) boot/shool.cfg ::/boot/
 
 # A blank FAT32 volume (no partition table) with a welcome file.
 $(DISK): assets/welcome.txt
-	@if [ -f $@ ]; then touch $@; exit 0; fi; 	dd if=/dev/zero of=$@.tmp bs=1M count=$(DISK_MB) status=none && 	mformat -i $@.tmp -F -v BHAIRAV :: && 	mcopy -i $@.tmp assets/welcome.txt ::/welcome.txt && 	mv $@.tmp $@
+	@if [ -f $@ ]; then touch $@; exit 0; fi; \
+	dd if=/dev/zero of=$@.tmp bs=1M count=$(DISK_MB) status=none && \
+	mformat -i $@.tmp -F -v BHAIRAV :: && \
+	mcopy -i $@.tmp assets/welcome.txt ::/welcome.txt && \
+	mv $@.tmp $@
 
 # One ISO for both firmware types:
 #   UEFI -> ShoolLoader🔱 (from the FAT boot image)
@@ -205,7 +218,7 @@ run-uefi: $(ISO) $(DISK)
 # Boots headless, saves the screen to build/screen.png and the serial log to
 # build/serial.log. Set FIRMWARE=uefi to boot through UEFI instead of BIOS.
 shot: $(ISO) $(DISK)
-	sh scripts/screenshot.sh $(ISO) $(BUILD) $(DISK) $(if $(filter uefi,$(FIRMWARE)),$(OVMF))
+	NIC=$(NIC) sh scripts/screenshot.sh $(ISO) $(BUILD) $(DISK) $(if $(filter uefi,$(FIRMWARE)),$(OVMF))
 
 clean:
 	rm -rf $(BUILD)

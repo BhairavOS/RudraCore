@@ -58,6 +58,20 @@ inline long spawn(char const* name, Handle const* handles = nullptr, unsigned lo
 
 inline long systemInfo(SystemInfo& out) { return syscall(SYS_SYSTEM_INFO, arg(&out)); }
 
+// Fills `out` with random bytes from the kernel (any length).
+inline long random(void* out, unsigned long length) {
+    auto* p = static_cast<unsigned char*>(out);
+    while (length) {
+        unsigned long n = length < 256 ? length : 256;
+        long r = syscall(SYS_RANDOM, arg(p), n);
+        if (r < 0)
+            return r;
+        p += n;
+        length -= n;
+    }
+    return OK;
+}
+
 // MARK: Handles and channels
 
 inline long close(Handle handle) { return syscall(SYS_HANDLE_CLOSE, handle); }
@@ -102,6 +116,16 @@ inline void* memoryMap(Handle memory) {
 inline void* memoryAlloc(unsigned long size) {
     long result = syscall(SYS_MEMORY_ALLOC, size);
     return result < 0 ? nullptr : reinterpret_cast<void*>(result);
+}
+
+// A data file from the boot image (e.g. "fonts"), mapped read-only, or nullptr.
+inline void const* openFile(char const* name) {
+    long handle = syscall(SYS_FILE_OPEN, arg(name), length(name));
+    if (handle < 0)
+        return nullptr;
+    void* address = memoryMap(static_cast<Handle>(handle));
+    syscall(SYS_HANDLE_CLOSE, static_cast<unsigned long>(handle)); // the mapping keeps it
+    return address;
 }
 
 // MARK: Devices

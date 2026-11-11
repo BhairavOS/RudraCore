@@ -154,7 +154,7 @@ private:
         Canvas c(_window.surface());
         c.fill(_window.surface().bounds(), Theme::SURFACE);
 
-        Font const& font = Font::system();
+        Font const& font = Font::mono();
         int width = _window.width(), height = _window.height();
         int columns = (width - 2 * PADDING) / font.width;
         int x = 0, y = 0;
@@ -177,7 +177,7 @@ private:
             }
             glyph[0] = _text[i];
             if (y >= scroll)
-                c.text({PADDING + x * font.width, PADDING + (y - scroll) * LINE_HEIGHT}, glyph, Theme::TEXT);
+                c.text({PADDING + x * font.width, PADDING + (y - scroll) * LINE_HEIGHT}, glyph, Theme::TEXT, font);
             x++;
         }
 
@@ -192,7 +192,7 @@ private:
     }
 
     int currentLine() const {
-        int columns = (_window.width() - 2 * PADDING) / Font::system().width;
+        int columns = (_window.width() - 2 * PADDING) / Font::mono().width;
         int x = 0, y = 0;
         for (unsigned long i = 0; i < _length; i++) {
             if (_text[i] == '\n' or x == columns) {

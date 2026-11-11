@@ -17,7 +17,7 @@ Config config;
 
 namespace {
 
-E1000* card = nullptr;
+Link* card = nullptr;
 
 constexpr u16 ETHERTYPE_IP = 0x0800, ETHERTYPE_ARP = 0x0806;
 constexpr u8 PROTO_ICMP = 1, PROTO_TCP = 6, PROTO_UDP = 17;
@@ -75,8 +75,8 @@ void logAddress(Text<>& t, u32 a) {
 // MARK: Ethernet and ARP
 
 void sendFrame(u8 const* destination, u16 type, u8 const* payload, u32 length) {
-    static u8 frame[E1000::MAX_FRAME];
-    if (length > E1000::MAX_FRAME - 14)
+    static u8 frame[Link::MAX_FRAME];
+    if (length > Link::MAX_FRAME - 14)
         return;
     memcpy(frame, destination, 6);
     memcpy(frame + 6, card->mac(), 6);
@@ -842,8 +842,8 @@ Socket* socketAt(long socket) {
 
 // MARK: Public interface
 
-void init(E1000& nic) {
-    card = &nic;
+void init(Link& link) {
+    card = &link;
     dhcpStart();
 }
 

@@ -1,3 +1,4 @@
+#include "core/random.h"
 #include "arch/x86_64/idt.h"
 
 #include "arch/x86_64/cpu.h"
@@ -179,6 +180,7 @@ extern "C" Frame* interruptDispatch(Frame* frame) {
         u8 irq = static_cast<u8>(vector - Idt::VECTOR_IRQ_BASE);
         if (Pic::isSpurious(irq))
             return frame;
+        Random::stir(); // device interrupts arrive at unpredictable moments
         if (Core::Irq::deliver(irq)) { // a userspace driver owns this line
             Pic::endOfInterrupt(irq);
             return frame;

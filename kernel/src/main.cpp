@@ -7,6 +7,7 @@
 #include "config.h"
 #include "core/device.h"
 #include "core/programs.h"
+#include "core/random.h"
 #include "core/sched.h"
 #include "core/shared_memory.h"
 #include "core/syscall.h"
@@ -165,9 +166,13 @@ void startInit(Boot::Info const& info) {
         log("[pci]  storage     no AHCI controller");
 
     // The network card: an Intel e1000 (82540EM, QEMU's default and common
-    // in virtual machines), 82545EM or 82574L, plus its interrupt line.
-    static constexpr u16 E1000_IDS[] = {0x100E, 0x100F, 0x10D3, 0x1004};
+    // in virtual machines, and relatives) or a Realtek RTL8139, plus its
+    // interrupt line.
+    static constexpr u16 E1000_IDS[] = {0x100E, 0x100F, 0x10D3, 0x1004, 0x1026, 0x1076, 0x107C, 0x1019};
+    static constexpr u16 RTL8139_IDS[] = {0x8139};
     auto* network = Core::PciDevice::findById(0x8086, E1000_IDS, sizeof(E1000_IDS) / sizeof(E1000_IDS[0]));
+    if (not network)
+        network = Core::PciDevice::findById(0x10EC, RTL8139_IDS, 1);
     handles[Abi::INIT_HANDLE_NETWORK - 1] = network;
     if (network) {
         u8 line = network->irqLine;
@@ -176,7 +181,7 @@ void startInit(Boot::Info const& info) {
             Arch::Pic::setLevelTriggered(line);
             handles[Abi::INIT_HANDLE_NETWORK_IRQ - 1] = new Core::Irq(line);
         }
-        log("[pci]  network     Intel ", Hex{network->vendor, 4}, ":", Hex{network->device, 4}, " at ",
+        log("[pci]  network     ", network->vendor == 0x10EC ? "Realtek " : "Intel ", Hex{network->vendor, 4}, ":", Hex{network->device, 4}, " at ",
             network->address.bus, ":", network->address.device, ".", network->address.function, ", irq ",
             usable ? static_cast<u64>(line) : 0, usable ? "" : " (unusable: the driver will poll)");
     } else {
@@ -234,6 +239,9 @@ extern "C" [[noreturn]] void kmain(u64 bootMagic, u64 bootInfo) {
     }
 
     Time::init();
+    Random::init(Time::unixTime() ^ (reinterpret_cast<u64>(&info) << 17));
+    log("[rand] random numbers from ", Random::hasHardwareSource() ? "RDRAND and " : "",
+        "cycle-counter timing");
     Sched::init();
     Programs::init(info);
     Syscall::init(info);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/shared_memory.h"
 #include "boot.h"
 #include "core/sched.h"
 #include "rudracore/syscalls.h"
@@ -14,5 +15,9 @@ void init(Boot::Info const& info);
 // nullptr with `code` and a readable `error` set.
 Core::Task* start(char const* name, usize nameLength, Core::Object* const* handles,
                   usize handleCount, Abi::Error& code, char const*& error);
+
+// A data file from the boot image as read-only shared memory (made on first
+// use and kept), or nullptr.
+Core::SharedMemory* file(char const* name);
 
 } // namespace Rudracore::Programs

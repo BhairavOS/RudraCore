@@ -14,6 +14,7 @@
 #include <kapala/protocol/input.h>
 #include <kapala/sys.h>
 #include <kapala/text.h>
+#include <kapala/tls.h>
 #include <kapala/window.h>
 
 using namespace Kapala;
@@ -307,7 +308,7 @@ private:
 
         if (same(cmd, "help")) {
             print("Files:   ls [folder]  cd folder  pwd  cat file  write file text...  mkdir folder  rm path", OUTPUT);
-            print("Network: ip  ping host [count]  host name  get http://address", OUTPUT);
+            print("Network: ip  ping host [count]  host name  get http(s)://address", OUTPUT);
             print("System:  date  uptime  mem  echo text...  clear", OUTPUT);
             print("Apps:    open browser|files|notes|monitor|about|terminal  edit file  browse address", OUTPUT);
         } else if (same(cmd, "clear")) {
@@ -369,7 +370,7 @@ private:
             host(w[1]);
         } else if (same(cmd, "get")) {
             if (n < 2)
-                return error("usage: get http://address");
+                return error("usage: get http(s)://address");
             get(w[1]);
         } else if (same(cmd, "date")) {
             date();
@@ -551,9 +552,10 @@ private:
     // Fetches a page and prints the response (headers and the start of the body).
     void get(char const* address) {
         char const* rest = address;
-        if (rest[0] == 'h' and rest[1] == 't' and rest[2] == 't' and rest[3] == 'p' and rest[4] == 's')
-            return error("https isn't supported yet: try http://");
-        if (rest[0] == 'h' and rest[1] == 't' and rest[2] == 't' and rest[3] == 'p' and rest[4] == ':')
+        bool secure = rest[0] == 'h' and rest[1] == 't' and rest[2] == 't' and rest[3] == 'p' and rest[4] == 's';
+        if (secure)
+            rest += 8;
+        else if (rest[0] == 'h' and rest[1] == 't' and rest[2] == 't' and rest[3] == 'p' and rest[4] == ':')
             rest += 7;
         char hostName[96];
         unsigned long h = 0;
@@ -568,25 +570,44 @@ private:
         long r = _net.resolve(hostName, ip);
         if (r < 0)
             return errorCode(hostName, r);
-        long socket = _net.tcpConnect(ip, 80);
+        long socket = _net.tcpConnect(ip, secure ? 443 : 80);
         if (socket < 0)
             return errorCode(hostName, socket);
+        Tls tls;
+        if (secure) {
+            if (tls.connect(_net, socket, hostName) < 0) {
+                Text<160> t;
+                t.add("TLS failed: ").add(tls.error());
+                tls.close();
+                return error(t.cstr());
+            }
+            Text<120> t;
+            t.add("(encrypted: ").add(tls.cipher()).add("; certificate not checked)");
+            print(t.cstr(), Theme::TEXT_DIM);
+        }
         Text<400> request;
         request.add("GET ").add(path).add(" HTTP/1.1\r\nHost: ").add(hostName)
             .add("\r\nUser-Agent: BhairavOS-terminal\r\nConnection: close\r\n\r\n");
-        _net.send(socket, request.cstr(), request.length);
+        if (secure)
+            tls.send(request.cstr(), request.length);
+        else
+            _net.send(socket, request.cstr(), request.length);
         static char data[24 * 1024];
         unsigned long total = 0;
         unsigned long start = Sys::timeMs();
         for (;;) {
-            long got = _net.receive(socket, data + total, sizeof(data) - 1 - total, 10000);
+            long got = secure ? tls.receive(data + total, sizeof(data) - 1 - total, 10000)
+                              : _net.receive(socket, data + total, sizeof(data) - 1 - total, 10000);
             if (got <= 0)
                 break;
             total += static_cast<unsigned long>(got);
             if (total >= sizeof(data) - 1)
                 break;
         }
-        _net.close(socket);
+        if (secure)
+            tls.close();
+        else
+            _net.close(socket);
         data[total] = '\0';
         print(data);
         Text<80> t;
@@ -623,7 +644,7 @@ private:
 
     // MARK: Drawing
 
-    int columns() const { return (_window.width() - 2 * PAD) / Font::system().width; }
+    int columns() const { return (_window.width() - 2 * PAD) / Font::mono().width; }
     int rows() const { return (_window.height() - 2 * PAD) / LINE_H; }
 
     // How many screen rows a line takes when wrapped.
@@ -636,7 +657,7 @@ private:
     void redraw() {
         Canvas c(_window.surface());
         c.fill(_window.surface().bounds(), BACKGROUND);
-        Font const& f = Font::system();
+        Font const& f = Font::mono();
         int cols = columns() > 0 ? columns() : 1;
         int totalRows = rows();
 
@@ -660,7 +681,7 @@ private:
             for (int row = 0; row < r; row++) {
                 copy(chunk, line.text + row * cols, static_cast<unsigned long>(cols) + 1);
                 if (y + row * LINE_H >= PAD - LINE_H)
-                    c.text({PAD, y + row * LINE_H}, chunk, line.color);
+                    c.text({PAD, y + row * LINE_H}, chunk, line.color, f);
             }
         }
 
@@ -671,11 +692,11 @@ private:
             int x = PAD;
             for (int row = 0; row < inputRows; row++) {
                 copy(chunk, text + row * cols, static_cast<unsigned long>(cols) + 1);
-                c.text({PAD, iy + row * LINE_H}, chunk, OUTPUT);
+                c.text({PAD, iy + row * LINE_H}, chunk, OUTPUT, f);
                 if (row == 0) { // the prompt in its own color
                     char p[128];
                     copy(p, text, promptLen + 1 < sizeof(p) ? promptLen + 1 : sizeof(p));
-                    c.text({PAD, iy}, p, PROMPT);
+                    c.text({PAD, iy}, p, PROMPT, f);
                 }
                 x = PAD + static_cast<int>(length(chunk)) * f.width;
             }
@@ -684,7 +705,7 @@ private:
         } else {
             Text<64> t;
             t.add("-- scrolled back ").add(_scrollBack).add(" lines: Page Down returns --");
-            c.text({PAD, iy}, t.cstr(), Theme::TEXT_DIM);
+            c.text({PAD, iy}, t.cstr(), Theme::TEXT_DIM, f);
         }
         _window.present();
     }

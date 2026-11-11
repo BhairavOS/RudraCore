@@ -15,6 +15,20 @@ void* memset(void* dest, int value, unsigned long n) {
     return ret;
 }
 
+void* memmove(void* dest, void const* src, unsigned long n) {
+    // (volatile: so the compiler can't turn these loops into memmove calls)
+    auto volatile* d = static_cast<unsigned char*>(dest);
+    auto const volatile* s = static_cast<unsigned char const*>(src);
+    if (d < s) {
+        for (unsigned long i = 0; i < n; i++)
+            d[i] = s[i];
+    } else {
+        for (unsigned long i = n; i > 0; i--)
+            d[i - 1] = s[i - 1];
+    }
+    return dest;
+}
+
 int memcmp(void const* a, void const* b, unsigned long n) {
     auto const* x = static_cast<unsigned char const*>(a);
     auto const* y = static_cast<unsigned char const*>(b);

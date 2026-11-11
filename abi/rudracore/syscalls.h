@@ -31,6 +31,9 @@ enum Syscall : unsigned long {
                      //   Starts a program from the boot image. The handles move to the new
                      //   program, which finds them as handles 1, 2, 3...
     SYS_SYSTEM_INFO = 7, // (SystemInfo* out)
+    SYS_RANDOM = 8,      // (void* out, usize length <= 256): fills it with random bytes, good for keys
+    SYS_FILE_OPEN = 9,   // (char const* name, usize length) -> Handle to read-only shared memory holding
+                         //   a data file from the boot image (e.g. "fonts"); its size is up to the file
 
     // Handles and channels
     SYS_HANDLE_CLOSE = 10,   // (Handle)

@@ -65,7 +65,7 @@ u64 dechunk(char* data, u64 n) {
 void fetch(Kapala::Net& net, Url const& url, Response& out, Progress progress) {
     out.error = Sys::OK;
     out.status = 0;
-    out.location[0] = out.contentType[0] = '\0';
+    out.location[0] = out.contentType[0] = out.security[0] = '\0';
     out.body.clear();
 
     Kapala::Text<160> message;
@@ -87,6 +87,36 @@ void fetch(Kapala::Net& net, Url const& url, Response& out, Progress progress) {
         return;
     }
 
+    // https: everything goes through TLS.
+    Kapala::Tls* tls = nullptr;
+    if (url.isHttps()) {
+        progress("Securing the connection (TLS)...");
+        tls = new Kapala::Tls();
+        long r = tls->connect(net, socket, url.host);
+        if (r < 0) {
+            copy(out.security, tls->error(), sizeof(out.security));
+            tls->close();
+            delete tls;
+            out.error = Sys::INVALID_ARGUMENT;
+            return;
+        }
+        copy(out.security, tls->cipher(), sizeof(out.security));
+    }
+    auto sendAll = [&](char const* data, u64 n) {
+        return tls ? tls->send(data, n) : net.send(socket, data, n);
+    };
+    auto receive = [&](char* data, u64 capacity) {
+        return tls ? tls->receive(data, capacity, 20000) : net.receive(socket, data, capacity, 20000);
+    };
+    auto finish = [&]() {
+        if (tls) {
+            tls->close();
+            delete tls;
+        } else {
+            net.close(socket);
+        }
+    };
+
     char request[Url::MAX_PATH + Url::MAX_HOST + 256];
     copy(request, "GET ", sizeof(request));
     append(request, url.path, sizeof(request));
@@ -97,9 +127,9 @@ void fetch(Kapala::Net& net, Url const& url, Response& out, Progress progress) {
            "Accept: text/html, text/plain;q=0.9, */*;q=0.1\r\n"
            "Accept-Language: en\r\nConnection: close\r\n\r\n",
            sizeof(request));
-    result = net.send(socket, request, length(request));
+    result = sendAll(request, length(request));
     if (result < 0) {
-        net.close(socket);
+        finish();
         out.error = result;
         return;
     }
@@ -109,11 +139,11 @@ void fetch(Kapala::Net& net, Url const& url, Response& out, Progress progress) {
     static char chunk[16 * 1024];
     u64 lastReport = 0;
     for (;;) {
-        long n = net.receive(socket, chunk, sizeof(chunk), 20000);
+        long n = receive(chunk, sizeof(chunk));
         if (n < 0) {
             if (raw.empty()) {
                 out.error = n;
-                net.close(socket);
+                finish();
                 return;
             }
             break; // keep what arrived
@@ -130,7 +160,7 @@ void fetch(Kapala::Net& net, Url const& url, Response& out, Progress progress) {
             progress(message.cstr());
         }
     }
-    net.close(socket);
+    finish();
     raw.push('\0');
 
     // Status line: "HTTP/1.1 200 OK"

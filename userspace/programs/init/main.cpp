@@ -6,7 +6,7 @@
 //   3: the keyboard interrupt
 //   4: the mouse interrupt
 //   5: the disk controller (AHCI), if there is one
-//   6: the network card (e1000), if there is one
+//   6: the network card (Intel e1000 or Realtek RTL8139), if there is one
 //   7: its interrupt line
 // init decides who gets what: it starts each driver and program with just
 // the handles that program needs, and finally KamalShell🪷.
@@ -99,19 +99,35 @@ Channel startStorage() {
     return connect;
 }
 
-// The network: net drives the card and runs TCP/IP. Returns the channel
-// that connects new clients to it.
+// The network: a driver for the card (chosen by its PCI vendor), and net,
+// which runs TCP/IP on top of it. Returns the channel that connects new
+// clients to net.
 Channel startNetwork() {
+    Channel driverSide, netSide;
+    Channel::createPair(driverSide, netSide);
+
+    Sys::DeviceInfo card{};
+    bool haveCard = Sys::deviceInfo(Sys::INIT_HANDLE_NETWORK, card) == Sys::OK;
+    char const* driver = card.vendor == 0x10EC ? "rtl8139" : "e1000";
+    if (haveCard) {
+        Sys::Handle give[] = {Sys::INIT_HANDLE_NETWORK, driverSide.handle(), Sys::INIT_HANDLE_NETWORK_IRQ};
+        long result = Sys::spawn(driver, give, 3);
+        if (result == Sys::BAD_HANDLE)
+            result = Sys::spawn(driver, give, 2); // a card without a usable interrupt: polled
+        if (result >= 0)
+            driverSide.release();
+    } else {
+        Sys::log("no network card: the network is unavailable");
+    }
+    driverSide = Channel(); // without a driver, net sees the channel closed
+
     Channel connect, netEnd;
     Channel::createPair(connect, netEnd);
-    Sys::Handle net[] = {Sys::INIT_HANDLE_NETWORK, netEnd.handle(), Sys::INIT_HANDLE_NETWORK_IRQ};
-    long result = Sys::spawn("net", net, 3);
-    if (result == Sys::BAD_HANDLE)
-        result = Sys::spawn("net", net, 2); // a card without a usable interrupt: polled
-    if (result >= 0)
+    Sys::Handle net[] = {netSide.handle(), netEnd.handle()};
+    if (Sys::spawn("net", net, 2) >= 0) {
+        netSide.release();
         netEnd.release();
-    else
-        Sys::log("no network card: the network is unavailable");
+    }
     return connect;
 }
 
@@ -165,6 +181,7 @@ int main() {
     spawnConnected("fs-test", files, Protocol::Fs::Connect{Protocol::Fs::CONNECT_MAGIC});
     Channel network = startNetwork();
     spawnConnected("net-test", network, Protocol::Net::Connect{Protocol::Net::CONNECT_MAGIC});
+    spawnConnected("tls-test", network, Protocol::Net::Connect{Protocol::Net::CONNECT_MAGIC});
 
     // Input: the PS/2 driver gets the controller and both IRQs, and sends
     // events to whoever holds the other end of `input`.

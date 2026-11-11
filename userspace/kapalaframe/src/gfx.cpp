@@ -1,5 +1,6 @@
 #include <kapala/gfx.h>
 #include <kapala/heap.h>
+#include <kapala/sys.h>
 
 extern "C" unsigned char const _kapalaFontStart[];
 extern "C" unsigned char const _kapalaFontEnd[];
@@ -79,9 +80,165 @@ void Bitmap::copyFrom(Bitmap const& source, Rect area) {
 
 // MARK: Text
 
+// MARK: Fonts
+
+namespace {
+
+struct FileHeader {
+    unsigned magic, faceCount;
+};
+
+struct FaceHeader {
+    char name[16];
+    unsigned short size;
+    short ascent, descent;
+    unsigned short lineHeight;
+    unsigned glyphCount, glyphOffset;
+} __attribute__((packed));
+
+struct GlyphEntry {
+    unsigned codepoint;
+    short left, top; // from the pen on the baseline
+    unsigned short width, height;
+    unsigned advance; // 1/64 px
+    unsigned bitmap;  // offset in the file
+};
+
+static_assert(sizeof(FaceHeader) == 32 and sizeof(GlyphEntry) == 20);
+
+constexpr int MAX_FACES = 16;
+
+struct Fonts {
+    unsigned char const* file = nullptr;
+    Font faces[MAX_FACES];
+    int count = 0;
+    Font bitmap; // the fallback
+    bool loaded = false;
+
+    void load() {
+        if (loaded)
+            return;
+        loaded = true;
+        file = static_cast<unsigned char const*>(Sys::openFile("fonts"));
+        auto const* header = reinterpret_cast<FileHeader const*>(file);
+        if (not file or header->magic != 0x314E4642)
+            return;
+        auto const* faceHeaders = reinterpret_cast<FaceHeader const*>(file + sizeof(FileHeader));
+        for (unsigned i = 0; i < header->faceCount and count < MAX_FACES; i++) {
+            FaceHeader const& h = faceHeaders[i];
+            Font& f = faces[count++];
+            f._face = &h;
+            f.size = h.size;
+            f.ascent = h.ascent;
+            f.height = h.lineHeight;
+            auto const* glyphs = reinterpret_cast<GlyphEntry const*>(file + h.glyphOffset);
+            // Width of "0", and whether every ASCII character is as wide.
+            int zero = 0;
+            bool same = true;
+            unsigned first = 0;
+            for (unsigned g = 0; g < h.glyphCount and glyphs[g].codepoint < 0x7F; g++) {
+                if (glyphs[g].codepoint == '0')
+                    zero = static_cast<int>((glyphs[g].advance + 32) / 64);
+                if (not first)
+                    first = glyphs[g].advance;
+                same = same and glyphs[g].advance == first;
+            }
+            f.width = zero ? zero : h.size / 2;
+            f._monospace = same;
+        }
+    }
+
+    Font const* find(char const* name, int size) {
+        load();
+        Font const* best = nullptr;
+        for (int i = 0; i < count; i++) {
+            auto const* h = static_cast<FaceHeader const*>(faces[i]._face);
+            bool sameName = true;
+            for (int k = 0; k < 16 and (name[k] or h->name[k]); k++) {
+                if (name[k] != h->name[k]) {
+                    sameName = false;
+                    break;
+                }
+            }
+            if (not sameName)
+                continue;
+            int d = h->size > size ? h->size - size : size - h->size;
+            int bestD = best ? (best->size > size ? best->size - size : size - best->size) : 1000;
+            if (d < bestD)
+                best = &faces[i];
+        }
+        return best;
+    }
+};
+
+Fonts fonts;
+
+GlyphEntry const* findGlyph(Font const& font, unsigned codepoint) {
+    auto const* h = static_cast<FaceHeader const*>(font._face);
+    auto const* glyphs = reinterpret_cast<GlyphEntry const*>(fonts.file + h->glyphOffset);
+    unsigned lo = 0, hi = h->glyphCount;
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        if (glyphs[mid].codepoint < codepoint)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo < h->glyphCount and glyphs[lo].codepoint == codepoint)
+        return &glyphs[lo];
+    return nullptr;
+}
+
+// The glyph to draw for a character: itself, or a stand-in.
+GlyphEntry const* glyphFor(Font const& font, unsigned codepoint) {
+    if (codepoint == '\t')
+        codepoint = ' ';
+    GlyphEntry const* g = findGlyph(font, codepoint);
+    if (not g)
+        g = findGlyph(font, 0xFFFD);
+    if (not g)
+        g = findGlyph(font, '?');
+    return g;
+}
+
+} // namespace
+
+unsigned decodeUtf8(char const*& text) {
+    auto b = static_cast<unsigned char>(*text++);
+    if (b < 0x80)
+        return b;
+    int extra = (b >> 5) == 6 ? 1 : (b >> 4) == 14 ? 2 : (b >> 3) == 30 ? 3 : 0;
+    if (extra == 0)
+        return 0xFFFD;
+    unsigned c = b & (0x3F >> extra);
+    for (int i = 0; i < extra; i++) {
+        auto next = static_cast<unsigned char>(*text);
+        if ((next & 0xC0) != 0x80)
+            return 0xFFFD;
+        c = c << 6 | (next & 0x3F);
+        text++;
+    }
+    return c;
+}
+
 Font const& Font::system() {
-    static Font font;
-    return font;
+    static Font const* font = fonts.find("sans", 13);
+    return font ? *font : fonts.bitmap;
+}
+
+Font const& Font::bold() {
+    static Font const* font = fonts.find("sans-bold", 13);
+    return font ? *font : fonts.bitmap;
+}
+
+Font const& Font::mono() {
+    static Font const* font = fonts.find("mono", 13);
+    return font ? *font : fonts.bitmap;
+}
+
+Font const& Font::get(char const* face, int size) {
+    Font const* font = fonts.find(face, size);
+    return font ? *font : fonts.bitmap;
 }
 
 unsigned char const* Font::glyph(char c) const {
@@ -94,10 +251,30 @@ unsigned char const* Font::glyph(char c) const {
 }
 
 int Font::measure(char const* text, int scale) const {
-    int n = 0;
+    unsigned long n = 0;
     while (text[n])
         n++;
-    return n * width * scale;
+    return measure(text, n, scale);
+}
+
+int Font::measure(char const* text, unsigned long bytes, int scale) const {
+    char const* end = text + bytes;
+    if (not _face) {
+        int n = 0;
+        while (text < end) {
+            decodeUtf8(text);
+            n++;
+        }
+        return n * width * scale;
+    }
+    unsigned long pen = 0;
+    while (text < end) {
+        unsigned c = decodeUtf8(text);
+        GlyphEntry const* g = glyphFor(*this, c);
+        if (g)
+            pen += _monospace ? static_cast<unsigned long>(width) * 64 : g->advance;
+    }
+    return static_cast<int>((pen + 32) / 64);
 }
 
 // MARK: Canvas
@@ -284,32 +461,28 @@ void Canvas::lotus(float cx, float baseY, float size, unsigned char alpha) {
 
 int Canvas::paragraph(Rect box, char const* text, Color c, int lineHeight) {
     Font const& font = Font::system();
-    int perLine = box.w / font.width;
-    if (perLine <= 0)
-        return 0;
     int y = box.y;
-    char line[256];
-
     while (*text) {
         while (*text == ' ')
             text++;
         // Take as many whole words as fit.
-        int n = 0, lastBreak = -1;
-        while (text[n] and text[n] != '\n' and n < perLine) {
+        unsigned long n = 0, lastBreak = 0;
+        while (text[n] and text[n] != '\n') {
+            unsigned long next = n + 1;
+            while (text[next] and (text[next] & 0xC0) == 0x80)
+                next++; // whole UTF-8 characters
+            if (font.measure(text, next, 1) > box.w)
+                break;
             if (text[n] == ' ')
                 lastBreak = n;
-            n++;
+            n = next;
         }
+        if (n == 0 and text[0] and text[0] != '\n')
+            n = 1;
         if (text[n] and text[n] != '\n' and text[n] != ' ' and lastBreak > 0)
             n = lastBreak;
-
-        int len = n < 255 ? n : 255;
-        for (int i = 0; i < len; i++)
-            line[i] = text[i];
-        line[len] = '\0';
-        this->text({box.x, y}, line, c);
+        this->text({box.x, y}, text, n, c, font);
         y += lineHeight;
-
         text += n;
         if (*text == '\n')
             text++;
@@ -358,24 +531,91 @@ void Canvas::fillCircle(float cx, float cy, float radius, Color c) {
 }
 
 int Canvas::text(Point at, char const* text, Color c, int scale) {
+    if (scale >= 2) {
+        Font const& big = Font::get("sans-bold", scale >= 3 ? 28 : 22);
+        if (big.smooth())
+            return this->text(at, text, c, big);
+    } else {
+        Font const& font = Font::system();
+        if (font.smooth())
+            return this->text(at, text, c, font);
+    }
+
+    // The bitmap fallback, at integer scales.
     Font const& font = Font::system();
     Rect r = clip.intersect(_target.bounds());
     int x = at.x;
-    for (; *text; text++, x += font.width * scale) {
+    while (*text) {
+        unsigned code = decodeUtf8(text);
+        char ch = code < 128 ? static_cast<char>(code) : '?';
         Rect cell{x, at.y, font.width * scale, font.height * scale};
-        if (cell.intersect(r).empty())
-            continue;
-        unsigned char const* g = font.glyph(*text);
-        if (not g)
-            continue;
-        for (int gy = 0; gy < font.height; gy++) {
-            for (int gx = 0; gx < font.width; gx++) {
-                if (g[gy] & (0x80 >> gx))
-                    fill(Rect{x + gx * scale, at.y + gy * scale, scale, scale}, c);
+        if (not cell.intersect(r).empty()) {
+            unsigned char const* g = font.glyph(ch);
+            for (int gy = 0; g and gy < font.height; gy++) {
+                for (int gx = 0; gx < font.width; gx++) {
+                    if (g[gy] & (0x80 >> gx))
+                        fill(Rect{x + gx * scale, at.y + gy * scale, scale, scale}, c);
+                }
             }
         }
+        x += font.width * scale;
     }
     return x;
+}
+
+int Canvas::text(Point at, char const* text, Color c, Font const& font) {
+    unsigned long n = 0;
+    while (text[n])
+        n++;
+    return this->text(at, text, n, c, font);
+}
+
+int Canvas::text(Point at, char const* text, unsigned long bytes, Color c, Font const& font) {
+    if (not font.smooth()) {
+        char line[512];
+        unsigned long n = bytes < sizeof(line) - 1 ? bytes : sizeof(line) - 1;
+        for (unsigned long i = 0; i < n; i++)
+            line[i] = text[i];
+        line[n] = '\0';
+        return this->text(at, line, c, 1);
+    }
+    Rect r = clip.intersect(_target.bounds());
+    // Text this far outside can be skipped quickly.
+    if (at.y >= r.bottom() or at.y + font.height <= r.y)
+        return at.x + font.measure(text, bytes, 1);
+
+    char const* end = text + bytes;
+    unsigned long pen = static_cast<unsigned long>(at.x) * 64;
+    int baseline = at.y + font.ascent;
+    while (text < end) {
+        unsigned code = decodeUtf8(text);
+        GlyphEntry const* g = glyphFor(font, code);
+        if (not g)
+            continue;
+        int x0 = static_cast<int>((pen + 32) / 64) + g->left;
+        int y0 = baseline + g->top;
+        Rect box{x0, y0, g->width, g->height};
+        Rect visible = box.intersect(r);
+        if (not visible.empty()) {
+            unsigned char const* coverage = fonts.file + g->bitmap;
+            unsigned packed = _target.pack(c);
+            for (int y = visible.y; y < visible.bottom(); y++) {
+                unsigned* row = _target.row(y);
+                unsigned char const* cov = coverage + (y - y0) * g->width;
+                for (int x = visible.x; x < visible.right(); x++) {
+                    unsigned char a = cov[x - x0];
+                    if (a == 0)
+                        continue;
+                    if (a == 255 and c.a == 255)
+                        row[x] = packed;
+                    else
+                        blend(row[x], c, a / 255.0f);
+                }
+            }
+        }
+        pen += font.monospace() ? static_cast<unsigned long>(font.width) * 64 : g->advance;
+    }
+    return static_cast<int>((pen + 32) / 64);
 }
 
 void Canvas::image(Point at, unsigned char const* rgba, int width, int height) {

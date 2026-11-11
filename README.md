@@ -56,6 +56,8 @@ Testing options (inside `.\bhairav.ps1 shell`, or on Linux):
 make shot PANIC_TEST=1                 # fault on purpose to check the panic screen
 make shot FIRMWARE=uefi WAIT=9         # boot through UEFI instead of BIOS
 STEP=0.1 MONITOR="..." make shot       # faster mouse commands (e.g. double clicks)
+NIC=rtl8139 make shot                  # a Realtek network card instead of the Intel one
+sh scripts/image-test.sh               # check the picture decoders against ImageMagick
 MEMORY=4G make shot                    # boot with more RAM
 KEYS="h i ret" make shot               # type on the virtual keyboard after boot
 MONITOR="mouse_move 41 13; mouse_button 1; mouse_button 0" make shot   # use the mouse
@@ -173,11 +175,17 @@ of this at every boot and removes what it made.
 
 ## Network
 
-**`net`** (`userspace/programs/net/`) drives the network card and runs the
-TCP/IP stack, written from scratch: Ethernet, ARP, IPv4, ICMP (ping), UDP,
-a DHCP client (it gets its address at boot), a DNS resolver with a cache,
-and TCP connections with retransmission. The card driver (`e1000.cpp`) is
-kept apart from the stack (`stack.cpp`), behind `send` and `receive`.
+Network cards have their own driver programs: **`e1000`** (Intel e1000
+family: QEMU, VirtualBox, VMware and many PCs) and **`rtl8139`** (Realtek
+RTL8139). init starts the one that matches the card. They share their main
+loop (`kapala/netdriver.h`) and hand frames to the network server through
+two rings in shared memory (`kapala/protocol/netdev.h`), so frames aren't
+copied through messages.
+
+**`net`** (`userspace/programs/net/`) runs the TCP/IP stack, written from
+scratch: Ethernet, ARP, IPv4, ICMP (ping), UDP, a DHCP client (it gets its
+address at boot), a DNS resolver with a cache, and TCP connections with
+retransmission.
 
 KamalShell connects every app to `net` as its handle 3. Apps use
 `Kapala::Net`:
@@ -196,6 +204,22 @@ net.close(socket);
 The `net-test` program checks DHCP, ping, DNS and an HTTP download at
 every boot.
 
+### HTTPS
+
+`Kapala::Tls` (`kapala/tls.h`) speaks **TLS 1.3** over a TCP socket:
+X25519 key exchange and ChaCha20-Poly1305 or AES-128-GCM encryption. The
+cryptography (`kapala/crypto.h`: SHA-256, HMAC, HKDF, X25519,
+ChaCha20-Poly1305, AES-GCM) is written from scratch, and `tls-test`
+checks it against the published test vectors at every boot, then makes
+real HTTPS connections. Keys come from the kernel's random number
+generator (`SYS_RANDOM`): ChaCha20, stirred with RDRAND when the CPU has
+it and with cycle-counter timing at every interrupt.
+
+**Not yet:** the server's certificate isn't checked, so a connection is
+private from eavesdroppers but can't prove it reaches the real site (an
+attacker in the middle could pretend to be it). The browser says so.
+Servers that only speak TLS 1.2 don't work yet.
+
 ## Bhairav Browser
 
 `userspace/programs/browser/`: loads pages over HTTP (following
@@ -206,10 +230,16 @@ an address bar that also searches (typing words searches through
 [FrogFind](http://frogfind.com), a search engine made for small browsers),
 and scrolling with the wheel, keys or the scrollbar.
 
-It doesn't speak **HTTPS** yet (that needs TLS encryption): for an HTTPS
-link it explains this and offers a simplified copy through FrogFind's
-reader, a third-party service that fetches the page for you. Scripts,
-styles and pictures aren't supported.
+HTTPS works through `Kapala::Tls` (see above). If a site's TLS can't be
+spoken, the browser explains why and offers a simplified copy through
+FrogFind's reader (a third-party service that fetches the page for you).
+
+**Pictures** (PNG, JPEG, GIF) load after the page, one at a time, and the
+page re-flows around them. **Fonts** are smooth, with headings in
+several sizes, and the text keeps its accents (Latin, Greek, Cyrillic).
+Scripts and style sheets don't run; pages that mark their content with
+`<main>` show just that, and menus and other clutter hidden by CSS stay
+hidden.
 
 ## Desktop
 
@@ -225,6 +255,24 @@ styles and pictures aren't supported.
 - Apps can start other apps with an argument (`Window::launch("notes",
   "/a.txt")`), and read theirs with `Window::argument()`.
 
+## Text and pictures
+
+**Fonts:** DejaVu Sans, Sans Bold and Sans Mono at several sizes,
+rendered with FreeType at build time into `assets/fonts.bin` (about 1,700
+characters per face: Latin with accents, Greek, Cyrillic, symbols). The
+kernel shares the file read-only with every program (`SYS_FILE_OPEN`), and
+`Canvas::text` draws it anti-aliased, as UTF-8. `Font::system()`,
+`Font::bold()`, `Font::mono()` and `Font::get("sans-bold", 22)` pick a
+face. To change the fonts, edit `scripts/make-fonts.py` and run it with
+Pillow (see the script). DejaVu's license is in `assets/DEJAVU-LICENSE`.
+Scripts that need shaping (Devanagari, Arabic) aren't supported yet.
+
+**Pictures:** `Kapala::Image` (`kapala/image.h`) decodes PNG (every color
+type and depth, interlaced too), baseline JPEG and GIF (the first frame),
+with its own inflate (zlib), and scales smoothly. `scripts/image-test.sh`
+compares every decoder with ImageMagick, pixel by pixel. Progressive
+JPEG, WebP and SVG aren't supported yet.
+
 ## Kapalaframe
 
 The library every program links against (`userspace/kapalaframe/`):
@@ -234,14 +282,17 @@ The library every program links against (`userspace/kapalaframe/`):
 | `kapala/sys.h` | System call wrappers |
 | `kapala/channel.h` | `Channel`: typed messages over channels |
 | `kapala/heap.h` | The heap behind `new` and `delete` |
-| `kapala/gfx.h` | `Bitmap`, `Color`, `Rect` and `Canvas`: clipped, anti-aliased rounded rectangles, circles, gradients, shadows, text and images, plus the Bhairav OS theme colors |
+| `kapala/gfx.h` | `Bitmap`, `Color`, `Rect` and `Canvas`: clipped, anti-aliased rounded rectangles, circles, gradients, shadows, smooth text (`Font`) and images, plus the Bhairav OS theme colors |
 | `kapala/window.h` | `Window`: a window on KamalShell, with events, timeouts, resizing and launching apps |
 | `kapala/files.h` | `Files`: read, write, append, list, remove and make directories on the disk |
 | `kapala/net.h` | `Net`: DNS, ping and TCP connections |
+| `kapala/tls.h`, `crypto.h` | `Tls`: TLS 1.3 connections; the cryptography under it |
+| `kapala/image.h` | `Image`: PNG, JPEG and GIF decoding, scaling |
+| `kapala/netdriver.h` | The main loop network card drivers share |
 | `kapala/text.h` | `Text`: build strings without the heap |
 | `kapala/protocol/input.h` | Keyboard and mouse events |
 | `kapala/protocol/shell.h` | The KamalShell window protocol |
-| `kapala/protocol/block.h`, `fs.h`, `net.h` | The disk driver, file system and network protocols |
+| `kapala/protocol/block.h`, `fs.h`, `net.h`, `netdev.h` | The disk driver, file system, network and network card protocols |
 
 ## Layout
 
@@ -259,16 +310,18 @@ The library every program links against (`userspace/kapalaframe/`):
 | `shoolloader/src/` | ShoolLoader🔱, the UEFI bootloader (own UEFI definitions in `efi.h`) |
 | `userspace/kapalaframe/` | Kapalaframe: the runtime and libraries every program uses |
 | `userspace/programs/<name>/` | Programs, built to `<name>.elf` and shipped in the boot image |
-| `assets/` | The Bhairav logo (converted at build time for the boot screen), and the disk's welcome file |
+| `assets/` | The Bhairav logo (converted at build time for the boot screen), the fonts, and the disk's welcome file |
 | `boot/shool.cfg` | ShoolLoader🔱 configuration: kernel, programs, screen mode |
 | `boot/limine.conf` | Limine configuration, for legacy BIOS boot |
 | `legacy/` | Earlier sources, kept for reference, not built |
 
 Programs today: `init` (root of userspace), `ps2` (keyboard and wheel
-mouse driver), `ahci` (disk driver), `fs` (file system), `net` (network
-card and TCP/IP), `kamalshell` (the desktop), the apps `browser`, `files`,
-`terminal`, `notes`, `monitor` and `about`, and `ipc-test`, `protect-test`,
-`fpu-test`, `fs-test` and `net-test` (checks run at every boot).
+mouse driver), `ahci` (disk driver), `fs` (file system), `e1000` and
+`rtl8139` (network card drivers), `net` (TCP/IP), `kamalshell` (the
+desktop), the apps `browser`, `files`, `terminal`, `notes`, `monitor` and
+`about`, and `ipc-test`, `protect-test`, `fpu-test`, `fs-test`, `net-test`
+and `tls-test` (checks run at every boot). The boot image also holds
+`fonts.bin`.
 
 ## Roadmap
 
@@ -299,11 +352,21 @@ Bhairav OS is built from scratch, one working step at a time:
 11. **Desktop** ✅: icons, resizable and maximizable windows, mouse wheel and
     arrow keys, network status and date in the taskbar, Files and Terminal
 
-Next: HTTPS (TLS) for the browser, smoother text (a vector font),
-pictures, NVMe disks and USB input (most new laptops), loading programs
-from disk, and multi-core.
+12. **Network drivers** ✅: card drivers as their own programs over shared
+    rings, a Realtek RTL8139 driver next to the Intel e1000 one
+13. **HTTPS** ✅: kernel random numbers, SHA-256/HKDF/X25519/ChaCha20-Poly1305/
+    AES-GCM, TLS 1.3 client, HTTPS in the browser and Terminal
+14. **Smooth text** ✅: DejaVu fonts shared from the boot image, anti-aliased
+    UTF-8 text everywhere
+15. **Pictures** ✅: PNG, JPEG and GIF decoders, pictures in web pages
+
+Next: checking HTTPS certificates (so the browser knows a site is real),
+TLS 1.2, progressive JPEG and WebP, text shaping for Indic scripts, NVMe
+disks and USB input (most new laptops), loading programs from disk, and
+multi-core.
 
 ## License
 
 GPL-3.0. See `LICENSE`. The boot console font is Terminus (SIL Open Font
-License), embedded from the toolchain image.
+License), embedded from the toolchain image. The interface fonts are
+DejaVu (Bitstream Vera license, see `assets/DEJAVU-LICENSE`).
