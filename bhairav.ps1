@@ -9,6 +9,8 @@
 #   .\bhairav.ps1 shot        boot headless, save build\screen.png + serial.log
 #   .\bhairav.ps1 clean       delete build\
 #   .\bhairav.ps1 shell       open a shell inside the toolchain container
+#   .\bhairav.ps1 serve-repo  serve an apt repository of apps\ on port 8080
+#                             (in Bhairav OS: apt add-repo http://10.0.2.2:8080)
 
 param([string]$Command = "build")
 
@@ -42,6 +44,13 @@ switch ($Command) {
     "shot"      { Invoke-Toolchain @("make", "shot") }
     "clean"     { Invoke-Toolchain @("make", "clean") }
     "shell"     { Invoke-Toolchain @("bash") -Interactive }
+    "serve-repo" {
+        # The apt repository of apps\ on port 8080 of this PC: Bhairav OS in
+        # QEMU reaches it with: apt add-repo http://10.0.2.2:8080
+        Invoke-Toolchain @("make", "-j8", "repo")
+        Write-Host "Serving build\repo on port 8080 (Ctrl+C stops it)."
+        & docker run --rm -it -p 8080:8080 -v "${Root}:/src" -w /src $Image make serve-repo
+    }
     { $_ -in "run", "run-uefi" } {
         $uefi = $Command -eq "run-uefi"
         Invoke-Toolchain @("make", "-j8")
@@ -69,5 +78,5 @@ switch ($Command) {
             Invoke-Toolchain @("make", $(if ($uefi) { "run-uefi" } else { "run" })) -Interactive
         }
     }
-    default { throw "Unknown command '$Command'. Use: toolchain, build, run, run-uefi, shot, clean, shell" }
+    default { throw "Unknown command '$Command'. Use: toolchain, build, run, run-uefi, shot, clean, shell, serve-repo" }
 }

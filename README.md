@@ -270,11 +270,25 @@ Apps that aren't part of the system install onto the disk, in
 `/apps/<id>/`, and then appear in the dock and the All Apps grid like the
 built-in ones. They come as `.bpk` packages (program, manifest and icon).
 
-- **App Store** (in the dock): the catalog that comes with Bhairav OS,
-  with Install, Open, Update and Remove buttons, plus a field to install a
-  package from a web address (`https://...`) or a file on the disk.
-- **Terminal:** `apps`, `install /path/app.bpk` (or an address),
-  `uninstall <id>`, and `open <id>`.
+- **apt** (in the Terminal), the package manager:
+
+  ```
+  apt update                     read the repositories' package lists
+  apt search clock               find apps
+  apt install clock calculator   install (also a .bpk file path or web address)
+  apt remove clock               uninstall
+  apt upgrade                    install newer versions
+  apt list --installed           (or --upgradable)
+  apt show clock
+  apt add-repo http://...        add a repository; apt sources lists them
+  ```
+
+  Repositories are web folders with a `Packages` index and the `.bpk`
+  files, listed in `/etc/apt/sources.txt`; the catalog in the system is
+  always one of them. `apt update` keeps their lists in `/var/apt/lists/`.
+- **App Store** (in the dock): the same packages as apt, with Install,
+  Open, Update and Remove buttons, Refresh (`apt update`), and a field to
+  install a package from a web address or a file on the disk.
 
 Installed programs start through `SYS_SPAWN_IMAGE`: KamalShell reads the
 program from the disk into shared memory and the kernel loads it from
@@ -285,7 +299,10 @@ install only what you trust.
 
 **Making apps:** see [`apps/README.md`](apps/README.md). `make packages`
 builds every app in `apps/` (two examples: Calculator and Clock) into a
-package and the App Store's catalog.
+package and the built-in catalog; `make repo` makes an apt repository of
+them in `build/repo/`, and `make serve-repo` serves it, so Bhairav OS in
+QEMU can `apt add-repo http://10.0.2.2:8080` (QEMU's address for the build
+machine).
 
 ## Text and pictures
 
@@ -322,6 +339,7 @@ The library every program links against (`userspace/kapalaframe/`):
 | `kapala/image.h` | `Image`: PNG, JPEG and GIF decoding, scaling |
 | `kapala/netdriver.h` | The main loop network card drivers share |
 | `kapala/apps.h` | Packages, installing and listing apps |
+| `kapala/apt.h` | apt: repositories, update, install, upgrade |
 | `kapala/http.h` | `httpGet`: download a file over HTTP or HTTPS |
 | `kapala/text.h` | `Text`: build strings without the heap |
 | `kapala/protocol/input.h` | Keyboard and mouse events |
@@ -348,7 +366,7 @@ The library every program links against (`userspace/kapalaframe/`):
 | `boot/shool.cfg` | ShoolLoader🔱 configuration: kernel, programs, screen mode |
 | `boot/limine.conf` | Limine configuration, for legacy BIOS boot |
 | `apps/` | Third-party example apps and the guide to making apps |
-| `tools/` | Build-machine tools (`bpk`: makes packages) |
+| `tools/` | Build-machine tools (`bpk`: makes packages; `serve`: serves a repository) |
 | `legacy/` | Earlier sources, kept for reference, not built |
 
 Programs today: `init` (root of userspace), `ps2` (keyboard and wheel
@@ -399,6 +417,8 @@ Bhairav OS is built from scratch, one working step at a time:
 16. **Clean desktop** ✅: top bar, dock, minimize, calmer palette
 17. **Third-party apps** ✅: packages, App Store, installing from the disk or
     the web, `SYS_SPAWN_IMAGE`, the app grid, an SDK with two examples
+18. **apt** ✅: repositories, `apt update/search/install/remove/upgrade`,
+    shared with the App Store; `make repo` / `make serve-repo`
 
 Next: checking HTTPS certificates (so the browser knows a site is real),
 TLS 1.2, progressive JPEG and WebP, text shaping for Indic scripts, NVMe

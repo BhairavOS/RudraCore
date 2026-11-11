@@ -4,12 +4,14 @@
 //   handle 2: the file system
 //   handle 3: the network
 //
-// Shows the catalog that comes with Bhairav OS (the "catalog" file in the
-// boot image, built from apps/ by `make packages`) and the apps installed
-// on the disk. At the bottom, a .bpk package can be installed from a web
+// Shows every app apt can install (kapala/apt.h: the catalog that comes
+// with Bhairav OS, plus the repositories added with `apt add-repo`) and the
+// apps installed on the disk. Refresh reads the repositories again (like
+// `apt update`). At the bottom, a .bpk package can be installed from a web
 // address (http:// or https://) or from a file on the disk.
 
 #include <kapala/apps.h>
+#include <kapala/apt.h>
 #include <kapala/files.h>
 #include <kapala/http.h>
 #include <kapala/image.h>
@@ -50,11 +52,11 @@ bool same(char const* a, char const* b) {
     return *a == *b;
 }
 
-// One app in the list: from the catalog, installed, or both.
+// One app in the list: offered by a repository, installed, or both.
 struct Row {
     AppInfo info;
-    unsigned char const* package = nullptr; // in the catalog (if it's there)
-    unsigned long packageSize = 0;
+    bool offered = false; // a repository has it
+    Apt::Available package;
     bool installed = false;
     char installedVersion[16] = {};
     Image icon;
@@ -107,28 +109,48 @@ private:
             _rows[i] = Row{};
         _count = 0;
 
-        // The catalog shipped with the system.
+        // What the repositories offer (the newest version of each app).
+        static Apt::Available offered[MAX_ROWS];
+        long n = _filesOk ? Apt::available(_files, offered, MAX_ROWS) : 0;
+        for (long k = 0; k < n; k++) {
+            Row* row = nullptr;
+            for (int i = 0; i < _count; i++) {
+                if (same(_rows[i].info.id, offered[k].info.id))
+                    row = &_rows[i];
+            }
+            if (row and Apt::compareVersions(offered[k].info.version, row->package.info.version) <= 0)
+                continue;
+            if (not row) {
+                if (_count >= MAX_ROWS)
+                    break;
+                row = &_rows[_count++];
+            }
+            row->info = offered[k].info;
+            row->package = offered[k];
+            row->offered = true;
+        }
+        // Icons of apps in the built-in catalog come with it.
         forEachInCatalog(_catalog, [&](unsigned char const* data, unsigned long size) {
             Package p;
             char const* why;
-            if (_count >= MAX_ROWS or not p.parse(data, size, why))
+            if (not p.parse(data, size, why))
                 return;
-            Row& row = _rows[_count++];
-            row.info = p.info();
-            row.package = data;
-            row.packageSize = size;
-            unsigned long iconSize = 0;
-            unsigned char const* png = p.file("icon.png", iconSize);
-            Image full;
-            if (png and Image::decode(png, iconSize, full, 1024 * 1024))
-                full.scaled(ICON, ICON, row.icon);
+            for (int i = 0; i < _count; i++) {
+                if (same(_rows[i].info.id, p.info().id) and not _rows[i].icon.pixels) {
+                    unsigned long iconSize = 0;
+                    unsigned char const* png = p.file("icon.png", iconSize);
+                    Image full;
+                    if (png and Image::decode(png, iconSize, full, 1024 * 1024))
+                        full.scaled(ICON, ICON, _rows[i].icon);
+                }
+            }
         });
 
         // What's installed (adding apps that aren't in the catalog).
         if (_filesOk) {
             static AppInfo installed[MAX_ROWS];
-            long n = listApps(_files, installed, MAX_ROWS);
-            for (long j = 0; j < n; j++) {
+            long installedCount = listApps(_files, installed, MAX_ROWS);
+            for (long j = 0; j < installedCount; j++) {
                 Row* row = nullptr;
                 for (int i = 0; i < _count; i++) {
                     if (same(_rows[i].info.id, installed[j].id))
@@ -139,6 +161,8 @@ private:
                         break;
                     row = &_rows[_count++];
                     row->info = installed[j];
+                }
+                if (not row->icon.pixels) { // the installed app's own icon
                     Text<96> path;
                     path.add("/apps/").add(installed[j].id).add("/icon.png");
                     unsigned long size = 0;
@@ -160,7 +184,8 @@ private:
             return setStatus("There's no disk to install to.");
         char const* why = "";
         AppInfo info;
-        long r = installPackage(_files, row.package, row.packageSize, info, why);
+        setStatus(same(row.package.source, Apt::BUILTIN) ? "Installing..." : "Downloading and installing...");
+        long r = Apt::install(_files, _net, row.package, info, why);
         if (r < 0) {
             Text<200> t;
             t.add("Couldn't install ").add(row.info.title).add(": ").add(why);
@@ -169,6 +194,23 @@ private:
         _window.appsChanged();
         Text<200> t;
         t.add(info.title).add(" is installed: it's in the dock now.");
+        setStatus(t.cstr());
+        reload();
+    }
+
+    // Reads every repository's list again (apt update).
+    void refresh() {
+        struct Report : Apt::UpdateReport {
+            int failed = 0;
+            void source(char const*, long packages, char const*) override { failed += packages < 0; }
+        } report;
+        setStatus("Reading the repositories...");
+        long total = Apt::update(_files, _net, report);
+        Text<160> t;
+        t.add(total).add(" apps in the repositories");
+        if (report.failed)
+            t.add(" (").add(report.failed).add(report.failed == 1 ? " repository didn't answer)" : " repositories didn't answer)");
+        t.add(".");
         setStatus(t.cstr());
         reload();
     }
@@ -244,6 +286,8 @@ private:
         return {r.right() - 14 - w - which * (w + 8), r.y + (r.h - 30) / 2, w, 30};
     }
 
+    Rect refreshButton() const { return {_window.width() - 16 - 104, 16, 104, 32}; }
+
     Rect inputRect() const {
         int w = _window.width();
         return {16, _window.height() - FOOTER_H + 16, w - 16 - 120, 32};
@@ -255,7 +299,7 @@ private:
     }
 
     bool updatable(Row const& row) const {
-        return row.installed and row.package and not same(row.installedVersion, row.info.version);
+        return row.installed and row.offered and Apt::compareVersions(row.package.info.version, row.installedVersion) > 0;
     }
 
     void onClick(Point at) {
@@ -270,6 +314,10 @@ private:
             installFrom(_input);
             return;
         }
+        if (refreshButton().contains(at)) {
+            refresh();
+            return;
+        }
         if (not listArea().contains(at)) {
             redraw();
             return;
@@ -277,7 +325,7 @@ private:
         for (int i = 0; i < _count; i++) {
             Row& row = _rows[i];
             if (rowButton(i, 0).contains(at)) {
-                if (updatable(row) or not row.installed)
+                if (updatable(row) or (not row.installed and row.offered))
                     install(row);
                 else
                     _window.launch(row.info.id);
@@ -301,6 +349,8 @@ private:
         }
         if (installButton().contains(at))
             hover = 1000;
+        if (refreshButton().contains(at))
+            hover = 1001;
         if (hover != _hover) {
             _hover = hover;
             redraw();
@@ -369,8 +419,9 @@ private:
 
         // Header
         c.text({20, 14}, "App Store", Theme::TEXT, Font::get("sans-bold", 22));
-        c.text({20, 42}, "Apps made for Bhairav OS by anyone. Installed apps live in /apps on the disk.",
+        c.text({20, 42}, "The same apps as \"apt\" in the Terminal. Add repositories with apt add-repo.",
                Theme::TEXT_DIM);
+        button(c, refreshButton(), "Refresh", false, _hover == 1001);
         c.fill({0, HEADER_H - 1, w, 1}, Color::hex(0x000000, 70));
 
         // The list
@@ -399,6 +450,8 @@ private:
                 meta.add(" · by ").add(row.info.author);
             if (row.installed)
                 meta.add(" · installed");
+            if (row.offered and not same(row.package.source, Apt::BUILTIN))
+                meta.add(" · repo");
             c.text({end, r.y + 10}, meta.cstr(), Theme::TEXT_DIM);
             Rect desc{tx, r.y + 32, rowButton(i, row.installed ? 1 : 0).x - tx - 10, r.h - 34};
             Rect saved = c.clip;

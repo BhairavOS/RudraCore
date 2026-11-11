@@ -54,14 +54,32 @@ make packages                               # builds build/packages/<id>.bpk for
 make install-app PKG=build/packages/clock.bpk   # copies one onto the disk
 ```
 
-Every package here is also in the catalog the App Store shows (it's in
-the boot image), so after `make`, they're one click away. Packages can
-also be installed:
+Every package here is also in the system's built-in catalog, so after
+`make`, `apt install clock` (or one click in the App Store) installs it.
+A package file can also be installed directly: `apt install /clock.bpk`
+or `apt install https://your-site/clock.bpk`.
 
-- from the disk: in the App Store's field, or `install /clock.bpk` in the Terminal;
-- from the web: `https://your-site/app.bpk` in the same places.
+## Publishing: an apt repository
 
-To publish an app, put its `.bpk` file on any web server.
+A repository is a web folder with the `.bpk` files and a `Packages` index:
+each app's manifest followed by `file = <its .bpk>`, blank lines between.
+
+```sh
+make repo          # build/repo/: every app here, and its Packages index
+make serve-repo    # serves it on port 8080 (for testing)
+```
+
+In Bhairav OS (QEMU reaches the build machine at 10.0.2.2):
+
+```
+apt add-repo http://10.0.2.2:8080
+apt update
+apt install calculator
+```
+
+To publish for real, copy `build/repo/` to any web server and share its
+address. To release a new version, raise `version` in the manifest and run
+`make repo` again: `apt upgrade` installs it.
 
 ## The package format
 

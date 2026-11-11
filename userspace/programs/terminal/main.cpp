@@ -10,6 +10,7 @@
 // commands; the wheel or Page Up/Down scroll back.
 
 #include <kapala/apps.h>
+#include <kapala/apt.h>
 #include <kapala/files.h>
 #include <kapala/http.h>
 #include <kapala/net.h>
@@ -312,7 +313,9 @@ private:
             print("Files:   ls [folder]  cd folder  pwd  cat file  write file text...  mkdir folder  rm path", OUTPUT);
             print("Network: ip  ping host [count]  host name  get http(s)://address", OUTPUT);
             print("System:  date  uptime  mem  echo text...  clear", OUTPUT);
-            print("Apps:    open app  edit file  browse address  apps  install file|address  uninstall app", OUTPUT);
+            print("Apps:    open app  edit file  browse address  apps", OUTPUT);
+            print("Packages: apt update | search word | list | show app | install app | remove app | upgrade", OUTPUT);
+            print("          apt add-repo address | remove-repo address | sources   (\"apt help\" for more)", OUTPUT);
         } else if (same(cmd, "clear")) {
             _count = 0;
             _first = 0;
@@ -408,18 +411,12 @@ private:
                     t.add("  (by ").add(apps[i].author).add(")");
                 print(t);
             }
-        } else if (same(cmd, "install")) {
-            if (n < 2)
-                return error("usage: install /path/app.bpk  or  install https://.../app.bpk");
-            installApp(w[1]);
-        } else if (same(cmd, "uninstall")) {
-            if (n < 2)
-                return error("usage: uninstall app");
-            long r = uninstallApp(_files, w[1]);
-            if (r < 0)
-                return errorCode(w[1], r);
-            _window.appsChanged();
-            print("removed", GOOD);
+        } else if (same(cmd, "apt")) {
+            apt(w + 1, n - 1);
+        } else if (same(cmd, "install") or same(cmd, "uninstall")) {
+            Text<120> t;
+            t.add("use \"apt ").add(same(cmd, "install") ? "install" : "remove").add("\" (see \"apt help\")");
+            error(t.cstr());
         } else if (same(cmd, "edit")) {
             if (n < 2)
                 return error("usage: edit file");
@@ -435,7 +432,262 @@ private:
         }
     }
 
-    void installApp(char const* source) {
+    // MARK: apt
+
+    struct Report : Apt::UpdateReport {
+        Terminal* terminal;
+        int index = 0;
+        void source(char const* address, long packages, char const* why) override {
+            Text<240> t;
+            index++;
+            if (packages < 0) {
+                t.add("Err:").add(index).add(" ").add(address).add("  ").add(why);
+                terminal->print(t.cstr(), ERROR);
+            } else {
+                t.add("Get:").add(index).add(" ").add(address).add(" Packages [").add(packages)
+                    .add(packages == 1 ? " package]" : " packages]");
+                terminal->print(t.cstr());
+            }
+            terminal->redraw();
+        }
+    };
+
+    bool installedVersion(char const* id, char* version) {
+        AppInfo info;
+        if (readAppInfo(_files, id, info) != Sys::OK)
+            return false;
+        copy(version, info.version, 16);
+        return true;
+    }
+
+    // The packages that have a newer version than the one installed.
+    long upgradable(Apt::Available* out, long capacity) {
+        static AppInfo installed[32];
+        long n = listApps(_files, installed, 32), count = 0;
+        for (long i = 0; i < n and count < capacity; i++) {
+            Apt::Available a;
+            if (Apt::find(_files, installed[i].id, a) and
+                Apt::compareVersions(a.info.version, installed[i].version) > 0)
+                out[count++] = a;
+        }
+        return count;
+    }
+
+    bool installOne(Apt::Available const& a) {
+        Text<200> t;
+        t.add("Installing ").add(a.info.id).add(" (").add(a.info.version).add(") from ").add(a.source).add("...");
+        print(t);
+        redraw();
+        AppInfo info;
+        char const* why = "";
+        if (Apt::install(_files, _net, a, info, why) < 0) {
+            Text<200> e;
+            e.add("E: couldn't install ").add(a.info.id).add(": ").add(why);
+            error(e.cstr());
+            return false;
+        }
+        return true;
+    }
+
+    void apt(char** w, int n) {
+        char const* sub = n > 0 ? w[0] : "help";
+        static Apt::Available all[64];
+
+        if (same(sub, "update")) {
+            Report report;
+            report.terminal = this;
+            long total = Apt::update(_files, _net, report);
+            print("Reading package lists... Done");
+            Apt::Available newer[16];
+            long u = upgradable(newer, 16);
+            Text<120> t;
+            t.add(total).add(" packages available. ");
+            if (u)
+                t.add(u).add(u == 1 ? " can be upgraded: run \"apt upgrade\"." : " can be upgraded: run \"apt upgrade\".");
+            else
+                t.add("All installed apps are up to date.");
+            print(t.cstr(), GOOD);
+        } else if (same(sub, "search") or same(sub, "list")) {
+            bool search = same(sub, "search");
+            if (search and n < 2)
+                return error("usage: apt search word");
+            bool onlyInstalled = n > 1 and same(w[1], "--installed");
+            bool onlyUpgradable = n > 1 and same(w[1], "--upgradable");
+            long count = Apt::available(_files, all, 64);
+            long shown = 0;
+            for (long i = 0; i < count; i++) {
+                Apt::Available const& a = all[i];
+                bool repeated = false; // (the same app in several repositories: show the newest once)
+                for (long k = 0; k < count and not repeated; k++)
+                    repeated = k != i and same(all[k].info.id, a.info.id) and
+                               (Apt::compareVersions(all[k].info.version, a.info.version) > 0 or
+                                (k < i and Apt::compareVersions(all[k].info.version, a.info.version) == 0));
+                if (repeated)
+                    continue;
+                if (search and not contains(a.info.id, w[1]) and not contains(a.info.title, w[1]) and
+                    not contains(a.info.description, w[1]))
+                    continue;
+                char version[16] = {};
+                bool installed = installedVersion(a.info.id, version);
+                bool newer = installed and Apt::compareVersions(a.info.version, version) > 0;
+                if ((onlyInstalled and not installed) or (onlyUpgradable and not newer))
+                    continue;
+                Text<240> t;
+                t.add(a.info.id).add("/").add(same(a.source, Apt::BUILTIN) ? "builtin" : "repo")
+                    .add(" ").add(a.info.version);
+                if (newer)
+                    t.add(" [upgradable from: ").add(version).add("]");
+                else if (installed)
+                    t.add(" [installed]");
+                print(t, installed ? GOOD : OUTPUT);
+                if (search) {
+                    Text<240> d;
+                    d.add("  ").add(a.info.title).add(": ").add(a.info.description);
+                    print(d, Theme::TEXT_DIM);
+                }
+                shown++;
+            }
+            if (shown == 0)
+                print(search ? "Nothing found. (Run \"apt update\" to refresh the lists.)" : "Nothing to list.",
+                      Theme::TEXT_DIM);
+        } else if (same(sub, "show")) {
+            if (n < 2)
+                return error("usage: apt show app");
+            Apt::Available a;
+            if (not Apt::find(_files, w[1], a))
+                return error("E: no such package (try \"apt update\", then \"apt search\")");
+            char version[16] = {};
+            bool installed = installedVersion(a.info.id, version);
+            Text<240> lines[6];
+            lines[0].add("Package: ").add(a.info.id);
+            lines[1].add("Title: ").add(a.info.title);
+            lines[2].add("Version: ").add(a.info.version);
+            if (installed)
+                lines[2].add(" (installed: ").add(version).add(")");
+            lines[3].add("Author: ").add(a.info.author[0] ? a.info.author : "?");
+            lines[4].add("Source: ").add(a.source);
+            lines[5].add("Description: ").add(a.info.description);
+            for (auto const& line : lines)
+                print(line);
+        } else if (same(sub, "install")) {
+            if (n < 2)
+                return error("usage: apt install app...  (or a .bpk file or address)");
+            int done = 0;
+            for (int k = 1; k < n; k++) {
+                char const* name = w[k];
+                bool path = false;
+                for (char const* p = name; *p; p++)
+                    path = path or *p == '/' or *p == '.';
+                if (path) { // a package file or address, not from a repository
+                    done += installFile(name);
+                    continue;
+                }
+                Apt::Available a;
+                if (not Apt::find(_files, name, a)) {
+                    Text<160> e;
+                    e.add("E: unable to locate package ").add(name).add(" (try \"apt update\")");
+                    error(e.cstr());
+                    continue;
+                }
+                char version[16] = {};
+                if (installedVersion(name, version) and Apt::compareVersions(a.info.version, version) <= 0) {
+                    Text<160> t;
+                    t.add(name).add(" is already the newest version (").add(version).add(").");
+                    print(t);
+                    continue;
+                }
+                done += installOne(a);
+            }
+            if (done) {
+                _window.appsChanged();
+                Text<120> t;
+                t.add("Done: ").add(done).add(done == 1 ? " app installed. It's in the dock." : " apps installed. They're in the dock.");
+                print(t.cstr(), GOOD);
+            }
+        } else if (same(sub, "remove") or same(sub, "purge")) {
+            if (n < 2)
+                return error("usage: apt remove app...");
+            int done = 0;
+            for (int k = 1; k < n; k++) {
+                long r = uninstallApp(_files, w[k]);
+                if (r < 0) {
+                    Text<120> e;
+                    e.add("E: ").add(w[k]).add(" isn't installed");
+                    error(e.cstr());
+                } else {
+                    Text<120> t;
+                    t.add("Removing ").add(w[k]).add("... Done");
+                    print(t);
+                    done++;
+                }
+            }
+            if (done)
+                _window.appsChanged();
+        } else if (same(sub, "upgrade")) {
+            Apt::Available newer[16];
+            long count = upgradable(newer, 16);
+            if (count == 0)
+                return print("All installed apps are up to date. (Run \"apt update\" first to check for new versions.)", GOOD);
+            int done = 0;
+            for (long i = 0; i < count; i++)
+                done += installOne(newer[i]);
+            if (done)
+                _window.appsChanged();
+            Text<80> t;
+            t.add(done).add(" upgraded.");
+            print(t.cstr(), GOOD);
+        } else if (same(sub, "add-repo") or same(sub, "remove-repo")) {
+            if (n < 2)
+                return error("usage: apt add-repo http://address  (a folder with a Packages file)");
+            bool add = same(sub, "add-repo");
+            long r = add ? Apt::addSource(_files, w[1]) : Apt::removeSource(_files, w[1]);
+            if (r == Sys::INVALID_ARGUMENT)
+                return error("E: a repository is an http:// or https:// address");
+            if (r == Sys::ALREADY_EXISTS)
+                return print("That repository is already there.");
+            if (r < 0)
+                return errorCode(w[1], r);
+            print(add ? "Added. Run \"apt update\" to read it." : "Removed.", GOOD);
+        } else if (same(sub, "sources")) {
+            static char list[16][Apt::MAX_SOURCE];
+            long count = Apt::sources(_files, list, 16);
+            for (long i = 0; i < count; i++) {
+                Text<200> t;
+                t.add("  ").add(list[i]).add(i == 0 ? "   (the catalog in the system)" : "");
+                print(t);
+            }
+        } else {
+            print("apt: Bhairav OS's package manager", GOOD);
+            print("  apt update                 read the repositories' package lists");
+            print("  apt search word            find apps");
+            print("  apt list [--installed | --upgradable]");
+            print("  apt show app               details about an app");
+            print("  apt install app...         install (also: a .bpk file path or web address)");
+            print("  apt remove app...          uninstall");
+            print("  apt upgrade                install newer versions of installed apps");
+            print("  apt add-repo address       add a repository (http://... folder with a Packages file)");
+            print("  apt remove-repo address    and remove one");
+            print("  apt sources                list the repositories");
+        }
+    }
+
+    static bool contains(char const* text, char const* word) {
+        auto lower = [](char c) { return c >= 'A' and c <= 'Z' ? static_cast<char>(c + 32) : c; };
+        for (; *text; text++) {
+            char const* a = text;
+            char const* b = word;
+            while (*a and *b and lower(*a) == lower(*b)) {
+                a++;
+                b++;
+            }
+            if (not *b)
+                return true;
+        }
+        return false;
+    }
+
+    // Installs a .bpk from a file or a web address. 1 if it worked.
+    int installFile(char const* source) {
         unsigned char* data = nullptr;
         unsigned long size = 0;
         char const* why = "";
@@ -445,29 +697,32 @@ private:
             redraw();
             if (httpGet(_net, source, data, size, why) < 0) {
                 Text<200> t;
-                t.add("download failed: ").add(why);
-                return error(t.cstr());
+                t.add("E: download failed: ").add(why);
+                error(t.cstr());
+                return 0;
             }
         } else {
             char path[96];
             resolve(source, path, sizeof(path));
             data = readWholeFile(_files, path, size);
-            if (not data)
-                return error("can't read that file");
+            if (not data) {
+                error("E: can't read that file");
+                return 0;
+            }
         }
         AppInfo info;
         long r = installPackage(_files, data, size, info, why);
         delete[] data;
         if (r < 0) {
             Text<200> t;
-            t.add("install failed: ").add(why);
-            return error(t.cstr());
+            t.add("E: install failed: ").add(why);
+            error(t.cstr());
+            return 0;
         }
-        _window.appsChanged();
         Text<160> t;
-        t.add("installed ").add(info.title).add(" ").add(info.version).add(": type \"open ").add(info.id)
-            .add("\" or find it in the dock");
-        print(t.cstr(), GOOD);
+        t.add("Installed ").add(info.id).add(" (").add(info.version).add(") from ").add(source);
+        print(t.cstr());
+        return 1;
     }
 
     static long number(char const* s) {

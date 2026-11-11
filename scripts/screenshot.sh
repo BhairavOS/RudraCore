@@ -10,6 +10,7 @@
 #                 QEMU monitor commands to run after KEYS (tests the mouse)
 #   NIC=e1000     the network card: e1000 or rtl8139
 #   STEP=0.3      seconds between MONITOR commands (lower it for double clicks)
+#   REPO=build/repo  serve this folder on port 8080 meanwhile (apt tests)
 set -eu
 
 ISO="$1"
@@ -23,6 +24,12 @@ MONITOR="${MONITOR:-}"
 STEP="${STEP:-0.3}"
 
 rm -f "$OUT/screen.png" "$OUT/serial.log"
+
+if [ -n "${REPO:-}" ]; then
+    "$OUT/tools/serve" "$REPO" 8080 > "$OUT/serve.log" 2>&1 &
+    SERVER=$!
+    trap 'kill $SERVER 2>/dev/null' EXIT
+fi
 
 set -- -M q35 -m "$MEMORY" -cdrom "$ISO" -boot d \
     -drive "file=$DISK,format=raw,if=none,id=disk" -device ide-hd,drive=disk,bus=ide.0 \

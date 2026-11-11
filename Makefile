@@ -107,7 +107,7 @@ QEMU_FLAGS := -M q35 -m 256M -cdrom $(ISO) -boot d \
 	-drive file=$(DISK),format=raw,if=none,id=disk -device ide-hd,drive=disk,bus=ide.0 \
 	-netdev user,id=net -device $(NIC),netdev=net
 
-.PHONY: all kernel user shool iso disk packages install-app run run-uefi shot clean FORCE
+.PHONY: all kernel user shool iso disk packages repo serve-repo install-app run run-uefi shot clean FORCE
 
 all: iso $(DISK)
 
@@ -203,6 +203,32 @@ packages: $(PACKAGES)
 $(BOOT_FILES)/catalog.bin: $(PACKAGES) $(BPK)
 	@mkdir -p $(@D)
 	$(BPK) catalog $@ $(PACKAGES)
+
+# An apt repository: every package here plus its Packages index, in
+# build/repo/. `make serve-repo` serves it on port 8080; in QEMU, Bhairav OS
+# reaches it with: apt add-repo http://10.0.2.2:8080
+REPO := $(BUILD)/repo
+SERVE := $(BUILD)/tools/serve
+
+repo: $(REPO)/Packages
+
+$(REPO)/Packages: $(PACKAGES)
+	@mkdir -p $(REPO)
+	cp $(PACKAGES) $(REPO)/
+	@rm -f $@.tmp
+	@for app in $(SDK_APPS); do \
+		sed -e 's/\r$$//' apps/$$app/manifest.txt >> $@.tmp; \
+		echo "file = $$app.bpk" >> $@.tmp; \
+		echo >> $@.tmp; \
+	done
+	mv $@.tmp $@
+
+$(SERVE): tools/serve.cpp
+	@mkdir -p $(@D)
+	clang++ -std=c++20 -O2 $< -o $@
+
+serve-repo: $(REPO)/Packages $(SERVE)
+	$(SERVE) $(REPO) 8080
 
 # Copies a package onto the disk, to install from the App Store's file
 # field: make install-app PKG=build/packages/clock.bpk
