@@ -29,13 +29,14 @@ The compiler, assembler, ISO tools and QEMU all run inside a container.
 ```
 
 For a QEMU window on Windows: `winget install SoftwareFreedomConservancy.QEMU`.
-After the boot screen, KamalShell🪷 starts with the About window open.
-Double-click a desktop icon (Browser, Files, Terminal, Notes, Monitor,
-About) or click the lotus in the corner for the launcher. Drag windows by
-their title bar; resize them by the dots in the bottom-right corner;
-maximize them with the square button or a double click on the title bar;
-close them with x. Click inside the QEMU window to give it the mouse;
-Ctrl+Alt+G releases it.
+After the boot screen, KamalShell🪷 shows a clean desktop: a thin bar at
+the top and a dock at the bottom. Click an app in the dock to open it (or
+to bring it back if it's open or minimized). In a window's top-left
+corner, the three controls close (rose), minimize (gold) and maximize
+(jade); double-clicking the title bar also maximizes. Drag windows by
+their title bar and resize them by the bottom-right corner. The lotus at
+the top left opens a small menu. Click inside the QEMU window to give it
+the mouse; Ctrl+Alt+G releases it.
 
 QEMU gives Bhairav OS a network card (an Intel e1000) on its built-in
 network, which reaches the internet through your PC, so the Browser and
@@ -243,11 +244,18 @@ hidden.
 
 ## Desktop
 
-- **Icons** for the apps, opened with a double click.
-- **Windows** can be moved, resized (apps that support it get a
-  `WindowEvent::Resize`), maximized and closed.
-- **Taskbar:** launcher, a button per window, the network status and
+- **Top bar** (frosted): the lotus menu (About, System Monitor, Terminal,
+  Show Desktop), the name of the app in front, the network status and
   address, and the date and time (UTC).
+- **Dock** (floating, frosted): every app, its name above it under the
+  pointer, and a dot under the running ones.
+- **Windows:** the title bar shares the window's color, with the title
+  centered and the controls at the top left; soft shadows and a fine light
+  edge. Windows can be moved, resized (apps that support it get a
+  `WindowEvent::Resize`), minimized to the dock, maximized (to the space
+  between the bars) and closed.
+- **Palette:** calm warm neutrals with saffron and lotus as accents
+  (`Theme` in `kapala/gfx.h`), and a soft wallpaper painted at start.
 - **Apps:** Browser, **Files** (folders and files on the disk, sizes and
   dates, new folder or file, delete, open in Notes), **Terminal** (`help`
   lists its commands: files, network, system, opening apps), Notes,
