@@ -55,6 +55,30 @@ Core::SharedMemory* file(char const* name) {
     return nullptr;
 }
 
+bool exists(char const* name, usize nameLength) {
+    for (usize i = 0; bootInfo and i < bootInfo->moduleCount; i++) {
+        if (nameEquals(bootInfo->modules[i].name, name, nameLength))
+            return true;
+    }
+    return false;
+}
+
+Core::Task* startImage(char const* name, u8 const* data, usize size, Core::Object* const* handles,
+                       usize handleCount, Abi::Error& code, char const*& error) {
+    Elf::Program program;
+    if (not Elf::load(data, size, program, error)) {
+        code = Abi::INVALID_ARGUMENT;
+        dropHandles(handles, handleCount);
+        return nullptr;
+    }
+    Core::Task* task = Sched::spawnUser(name, program.space, program.entry, program.stackTop, handles, handleCount);
+    if (not task) {
+        code = Abi::OUT_OF_MEMORY;
+        error = "out of memory";
+    }
+    return task;
+}
+
 Core::Task* start(char const* name, usize nameLength, Core::Object* const* handles,
                   usize handleCount, Abi::Error& code, char const*& error) {
     Boot::Module const* module = nullptr;
@@ -70,21 +94,7 @@ Core::Task* start(char const* name, usize nameLength, Core::Object* const* handl
         dropHandles(handles, handleCount);
         return nullptr;
     }
-
-    Elf::Program program;
-    if (not Elf::load(module->data, module->size, program, error)) {
-        code = Abi::INVALID_ARGUMENT;
-        dropHandles(handles, handleCount);
-        return nullptr;
-    }
-
-    Core::Task* task = Sched::spawnUser(module->name, program.space, program.entry, program.stackTop,
-                                        handles, handleCount);
-    if (not task) {
-        code = Abi::OUT_OF_MEMORY;
-        error = "out of memory";
-    }
-    return task;
+    return startImage(module->name, module->data, module->size, handles, handleCount, code, error);
 }
 
 } // namespace Rudracore::Programs

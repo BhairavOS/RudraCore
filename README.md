@@ -244,11 +244,12 @@ hidden.
 
 ## Desktop
 
-- **Top bar** (frosted): the lotus menu (About, System Monitor, Terminal,
+- **Top bar** (frosted): the lotus menu (About, All Apps, App Store,
   Show Desktop), the name of the app in front, the network status and
   address, and the date and time (UTC).
-- **Dock** (floating, frosted): every app, its name above it under the
-  pointer, and a dot under the running ones.
+- **Dock** (floating, frosted): the built-in apps, then installed ones,
+  then the **All Apps** grid; the name above each under the pointer, and a
+  dot under the running ones.
 - **Windows:** the title bar shares the window's color, with the title
   centered and the controls at the top left; soft shadows and a fine light
   edge. Windows can be moved, resized (apps that support it get a
@@ -262,6 +263,29 @@ hidden.
   System Monitor and About.
 - Apps can start other apps with an argument (`Window::launch("notes",
   "/a.txt")`), and read theirs with `Window::argument()`.
+
+## Installing apps
+
+Apps that aren't part of the system install onto the disk, in
+`/apps/<id>/`, and then appear in the dock and the All Apps grid like the
+built-in ones. They come as `.bpk` packages (program, manifest and icon).
+
+- **App Store** (in the dock): the catalog that comes with Bhairav OS,
+  with Install, Open, Update and Remove buttons, plus a field to install a
+  package from a web address (`https://...`) or a file on the disk.
+- **Terminal:** `apps`, `install /path/app.bpk` (or an address),
+  `uninstall <id>`, and `open <id>`.
+
+Installed programs start through `SYS_SPAWN_IMAGE`: KamalShell reads the
+program from the disk into shared memory and the kernel loads it from
+there (checking it like any program: no writable-and-executable memory,
+a memory limit, everything inside user space). Apps get the same handles
+as built-in ones (shell, files, network), so they can do what any app can:
+install only what you trust.
+
+**Making apps:** see [`apps/README.md`](apps/README.md). `make packages`
+builds every app in `apps/` (two examples: Calculator and Clock) into a
+package and the App Store's catalog.
 
 ## Text and pictures
 
@@ -297,6 +321,8 @@ The library every program links against (`userspace/kapalaframe/`):
 | `kapala/tls.h`, `crypto.h` | `Tls`: TLS 1.3 connections; the cryptography under it |
 | `kapala/image.h` | `Image`: PNG, JPEG and GIF decoding, scaling |
 | `kapala/netdriver.h` | The main loop network card drivers share |
+| `kapala/apps.h` | Packages, installing and listing apps |
+| `kapala/http.h` | `httpGet`: download a file over HTTP or HTTPS |
 | `kapala/text.h` | `Text`: build strings without the heap |
 | `kapala/protocol/input.h` | Keyboard and mouse events |
 | `kapala/protocol/shell.h` | The KamalShell window protocol |
@@ -321,15 +347,17 @@ The library every program links against (`userspace/kapalaframe/`):
 | `assets/` | The Bhairav logo (converted at build time for the boot screen), the fonts, and the disk's welcome file |
 | `boot/shool.cfg` | ShoolLoader🔱 configuration: kernel, programs, screen mode |
 | `boot/limine.conf` | Limine configuration, for legacy BIOS boot |
+| `apps/` | Third-party example apps and the guide to making apps |
+| `tools/` | Build-machine tools (`bpk`: makes packages) |
 | `legacy/` | Earlier sources, kept for reference, not built |
 
 Programs today: `init` (root of userspace), `ps2` (keyboard and wheel
 mouse driver), `ahci` (disk driver), `fs` (file system), `e1000` and
 `rtl8139` (network card drivers), `net` (TCP/IP), `kamalshell` (the
-desktop), the apps `browser`, `files`, `terminal`, `notes`, `monitor` and
-`about`, and `ipc-test`, `protect-test`, `fpu-test`, `fs-test`, `net-test`
+desktop), the apps `browser`, `files`, `terminal`, `notes`, `monitor`,
+`store` and `about`, and `ipc-test`, `protect-test`, `fpu-test`, `fs-test`, `net-test`
 and `tls-test` (checks run at every boot). The boot image also holds
-`fonts.bin`.
+`fonts.bin` and `catalog.bin` (the App Store's packages).
 
 ## Roadmap
 
@@ -367,6 +395,10 @@ Bhairav OS is built from scratch, one working step at a time:
 14. **Smooth text** ✅: DejaVu fonts shared from the boot image, anti-aliased
     UTF-8 text everywhere
 15. **Pictures** ✅: PNG, JPEG and GIF decoders, pictures in web pages
+
+16. **Clean desktop** ✅: top bar, dock, minimize, calmer palette
+17. **Third-party apps** ✅: packages, App Store, installing from the disk or
+    the web, `SYS_SPAWN_IMAGE`, the app grid, an SDK with two examples
 
 Next: checking HTTPS certificates (so the browser knows a site is real),
 TLS 1.2, progressive JPEG and WebP, text shaping for Indic scripts, NVMe

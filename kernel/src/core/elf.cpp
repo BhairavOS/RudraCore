@@ -81,6 +81,11 @@ bool loadSegment(Vmm::Space& space, u8 const* data, usize size, ProgramHeader co
         return false;
     }
 
+    if ((ph.flags & FLAG_WRITE) and (ph.flags & FLAG_EXEC)) {
+        error = "a segment is both writable and executable";
+        return false;
+    }
+
     u32 access = Vmm::USER | Vmm::OWNED;
     if (ph.flags & FLAG_WRITE)
         access |= Vmm::WRITE;
@@ -145,6 +150,22 @@ bool load(u8 const* data, usize size, Program& out, char const*& error) {
     }
 
     auto const* headers = reinterpret_cast<ProgramHeader const*>(data + header->programHeaderOffset);
+
+    // Programs can come from anywhere (installed apps): refuse any that
+    // asks for an unreasonable amount of memory before allocating it.
+    constexpr u64 MAX_PROGRAM_MEMORY = 256ull * 1024 * 1024;
+    u64 total = 0;
+    for (u16 i = 0; i < header->programHeaderCount; i++) {
+        if (headers[i].type != SEGMENT_LOAD)
+            continue;
+        if (headers[i].memorySize > MAX_PROGRAM_MEMORY or total + headers[i].memorySize > MAX_PROGRAM_MEMORY) {
+            error = "the program asks for too much memory";
+            Vmm::destroyUserSpace(space);
+            return false;
+        }
+        total += headers[i].memorySize;
+    }
+
     bool loadedAny = false;
     for (u16 i = 0; i < header->programHeaderCount; i++) {
         if (headers[i].type != SEGMENT_LOAD or headers[i].memorySize == 0)

@@ -29,9 +29,12 @@ enum Syscall : unsigned long {
     SYS_TIME = 5,    // () -> milliseconds since boot
     SYS_SPAWN = 6,   // (char const* name, usize length, Handle const* handles, usize count) -> task id
                      //   Starts a program from the boot image. The handles move to the new
-                     //   program, which finds them as handles 1, 2, 3...
+                     //   program, which finds them as handles 1, 2, 3... (NOT_FOUND, or a bad
+                     //   handle, leaves them with the caller.)
     SYS_SYSTEM_INFO = 7, // (SystemInfo* out)
     SYS_RANDOM = 8,      // (void* out, usize length <= 256): fills it with random bytes, good for keys
+    SYS_SPAWN_IMAGE = 15, // (SpawnImage const*) -> task id: starts a program from an ELF file in
+                          //   shared memory (an installed app). The handles move to it, as with spawn.
     SYS_FILE_OPEN = 9,   // (char const* name, usize length) -> Handle to read-only shared memory holding
                          //   a data file from the boot image (e.g. "fonts"); its size is up to the file
 
@@ -78,6 +81,14 @@ struct DeviceInfo {
     unsigned short vendor, device;
     unsigned char classCode, subclass, progIf, irqLine;
     unsigned long barSize[6]; // 0: no memory BAR there
+};
+
+struct SpawnImage {
+    Handle memory;          // shared memory holding the ELF file
+    unsigned long size;     // its length in bytes
+    char name[32];          // the task's name
+    Handle handles[8];      // given to the program as its handles 1, 2, 3...
+    unsigned long handleCount;
 };
 
 struct IrqMessage {

@@ -78,7 +78,17 @@ SHOOL_CXXFLAGS := \
 # What goes on the boot media: stripped copies (the unstripped ELFs in
 # build/ keep their debug info for backtraces).
 BOOT_FILES := $(BUILD)/boot-files
-STRIPPED := $(BOOT_FILES)/rudracore.elf $(USER_PROGRAMS:%=$(BOOT_FILES)/%.elf) $(BOOT_FILES)/fonts.bin
+# Third-party apps (the SDK examples in apps/<name>/): built like programs,
+# packed into .bpk packages, and bundled into the catalog the App Store
+# offers. They aren't part of the system: they're installed on the disk.
+SDK_APPS := $(patsubst apps/%/manifest.txt,%,$(wildcard apps/*/manifest.txt))
+PACKAGES := $(SDK_APPS:%=$(BUILD)/packages/%.bpk)
+APP_OBJS := $(patsubst %,$(BUILD)/%.o,$(shell find apps -name '*.cpp' 2>/dev/null))
+appObjs = $(patsubst %,$(BUILD)/%.o,$(shell find apps/$(1) -name '*.cpp'))
+BPK := $(BUILD)/tools/bpk
+
+STRIPPED := $(BOOT_FILES)/rudracore.elf $(USER_PROGRAMS:%=$(BOOT_FILES)/%.elf) $(BOOT_FILES)/fonts.bin \
+	$(BOOT_FILES)/catalog.bin
 
 # The UEFI boot image: a FAT file system with ShoolLoader as the default
 # UEFI boot program, plus the kernel, programs and shool.cfg.
@@ -97,7 +107,7 @@ QEMU_FLAGS := -M q35 -m 256M -cdrom $(ISO) -boot d \
 	-drive file=$(DISK),format=raw,if=none,id=disk -device ide-hd,drive=disk,bus=ide.0 \
 	-netdev user,id=net -device $(NIC),netdev=net
 
-.PHONY: all kernel user shool iso disk run run-uefi shot clean FORCE
+.PHONY: all kernel user shool iso disk packages install-app run run-uefi shot clean FORCE
 
 all: iso $(DISK)
 
@@ -168,6 +178,38 @@ $(BOOT_FILES)/rudracore.elf: $(KERNEL)
 	llvm-strip -o $@ $<
 
 # The fonts (made by scripts/make-fonts.py, see `make fonts`).
+# Apps and packages
+$(BUILD)/apps/%.cpp.o: apps/%.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(USER_CXXFLAGS) -c $< -o $@
+
+$(BUILD)/app-elf/%.elf: $(KAPALA_OBJS) userspace/link.ld $$(call appObjs,$$*)
+	@mkdir -p $(@D)
+	$(LD) $(USER_LDFLAGS) $(filter %.o,$^) -o $@
+
+# The packing tool runs on the build machine.
+$(BPK): tools/bpk.cpp
+	@mkdir -p $(@D)
+	clang++ -std=c++20 -O2 $< -o $@
+
+$(BUILD)/packages/%.bpk: $(BUILD)/app-elf/%.elf apps/%/manifest.txt $(BPK)
+	@mkdir -p $(@D)
+	llvm-strip -o $(@D)/$*.elf $<
+	$(BPK) pack $@ apps/$*/manifest.txt $(@D)/$*.elf $(wildcard apps/$*/icon.png)
+	rm -f $(@D)/$*.elf
+
+packages: $(PACKAGES)
+
+$(BOOT_FILES)/catalog.bin: $(PACKAGES) $(BPK)
+	@mkdir -p $(@D)
+	$(BPK) catalog $@ $(PACKAGES)
+
+# Copies a package onto the disk, to install from the App Store's file
+# field: make install-app PKG=build/packages/clock.bpk
+install-app: $(DISK)
+	@test -n "$(PKG)" || (echo "usage: make install-app PKG=path/to/app.bpk" && exit 1)
+	mcopy -o -i $(DISK) $(PKG) ::/
+
 $(BOOT_FILES)/fonts.bin: assets/fonts.bin
 	@mkdir -p $(@D)
 	cp $< $@
@@ -223,4 +265,4 @@ shot: $(ISO) $(DISK)
 clean:
 	rm -rf $(BUILD)
 
--include $(OBJS:.o=.d) $(USER_OBJS:.o=.d) $(SHOOL_OBJS:.obj=.d)
+-include $(OBJS:.o=.d) $(USER_OBJS:.o=.d) $(SHOOL_OBJS:.obj=.d) $(APP_OBJS:.o=.d)

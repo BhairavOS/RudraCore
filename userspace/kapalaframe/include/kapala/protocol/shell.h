@@ -15,7 +15,8 @@
 //                                    <- MouseMove / MouseDown / MouseUp / Wheel / Key / Focus
 //                                    <- ResizeRequest(w, h): the user resized or maximized it
 //   Resize(w, h) + new memory       ->   (the window now uses the new pixels)
-//   Launch(program, argument)       ->   (starts another app)
+//   Launch(program, argument)       ->   (starts another app, built-in or installed)
+//   AppsChanged                     ->   (after installing or removing an app)
 //                                    <- Close (the user clicked x)
 //   (exits: the channel closes and the window goes away)
 
@@ -27,7 +28,8 @@ enum class Type : unsigned char {
     Present = 2,      // x, y, w, h: this part of the window changed
     SetTitle = 3,     // title
     Resize = 4,       // w, h; attached: shared memory with the new pixels
-    Launch = 5,       // title: program name (up to 15 characters), argument at title + 16
+    Launch = 5,       // title: program name (up to 23 characters), argument at title + 24
+    AppsChanged = 6,  // apps were installed or removed: look again
 
     // Shell -> app
     Opened = 10,
@@ -42,7 +44,7 @@ enum class Type : unsigned char {
     Argument = 19,      // title: what the app was launched with (e.g. a file path)
 };
 
-constexpr unsigned LAUNCH_ARGUMENT = 16; // where Launch's argument starts in title
+constexpr unsigned LAUNCH_ARGUMENT = 24; // where Launch's argument starts in title
 
 struct Message {
     Type type;

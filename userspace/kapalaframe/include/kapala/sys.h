@@ -58,6 +58,9 @@ inline long spawn(char const* name, Handle const* handles = nullptr, unsigned lo
 
 inline long systemInfo(SystemInfo& out) { return syscall(SYS_SYSTEM_INFO, arg(&out)); }
 
+// Starts a program from an ELF file in shared memory (see SpawnImage).
+inline long spawnImage(SpawnImage const& request) { return syscall(SYS_SPAWN_IMAGE, arg(&request)); }
+
 // Fills `out` with random bytes from the kernel (any length).
 inline long random(void* out, unsigned long length) {
     auto* p = static_cast<unsigned char*>(out);

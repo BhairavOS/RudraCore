@@ -117,6 +117,11 @@ Arch::Frame* sysSpawn(Call const& c) {
     memcpy(name, reinterpret_cast<void const*>(nameAddress), nameLength);
     name[nameLength] = '\0';
 
+    // No such program: fail before taking any handle, so the caller still
+    // has them (e.g. to start an installed app instead).
+    if (not Programs::exists(name, nameLength))
+        return c.result(Abi::NOT_FOUND);
+
     // Check every handle before moving any, so a bad one changes nothing.
     Abi::Handle handles[MAX_SPAWN_HANDLES];
     memcpy(handles, reinterpret_cast<void const*>(handlesAddress), handleCount * sizeof(Abi::Handle));
@@ -143,6 +148,48 @@ Arch::Frame* sysSpawn(Call const& c) {
 
     log("[sched] ", c.task->name, " started ", child->name, " as task ", child->id,
         " with ", handleCount, " handle(s)");
+    return c.result(static_cast<i64>(child->id));
+}
+
+Arch::Frame* sysSpawnImage(Call const& c) {
+    Abi::SpawnImage request;
+    if (not c.userMemory(c.arg0(), sizeof(request)))
+        return c.result(Abi::BAD_ADDRESS);
+    memcpy(&request, reinterpret_cast<void const*>(c.arg0()), sizeof(request));
+    request.name[sizeof(request.name) - 1] = '\0';
+    if (request.handleCount > MAX_SPAWN_HANDLES or request.name[0] == '\0')
+        return c.result(Abi::INVALID_ARGUMENT);
+
+    i64 error = 0;
+    auto* memory = c.lookup<Core::SharedMemory>(request.memory, ObjectType::Memory, error);
+    if (not memory)
+        return c.result(error);
+    if (not memory->owned or request.size == 0 or request.size > memory->size)
+        return c.result(Abi::INVALID_ARGUMENT);
+
+    // Check every handle before moving any, so a bad one changes nothing.
+    for (u64 i = 0; i < request.handleCount; i++) {
+        if (not c.task->handle(request.handles[i]) or request.handles[i] == request.memory)
+            return c.result(Abi::BAD_HANDLE);
+        for (u64 j = 0; j < i; j++) {
+            if (request.handles[j] == request.handles[i])
+                return c.result(Abi::INVALID_ARGUMENT);
+        }
+    }
+    Object* objects[MAX_SPAWN_HANDLES];
+    for (u64 i = 0; i < request.handleCount; i++)
+        objects[i] = c.task->takeHandle(request.handles[i]);
+
+    Abi::Error code = Abi::OK;
+    char const* why = nullptr;
+    Task* child = Programs::startImage(request.name, Mem::toVirtual<u8>(memory->physical), request.size, objects,
+                                       request.handleCount, code, why);
+    if (not child) {
+        log("[sched] ", c.task->name, " can't start the app ", static_cast<char const*>(request.name), ": ", why);
+        return c.result(code);
+    }
+    log("[sched] ", c.task->name, " started the app ", child->name, " as task ", child->id, " with ",
+        request.handleCount, " handle(s)");
     return c.result(static_cast<i64>(child->id));
 }
 
@@ -615,6 +662,7 @@ Arch::Frame* dispatch(Arch::Frame* frame) {
     case Abi::SYS_TASK_ID: return c.result(static_cast<i64>(c.task->id));
     case Abi::SYS_TIME: return c.result(static_cast<i64>(Time::now()));
     case Abi::SYS_SPAWN: return sysSpawn(c);
+    case Abi::SYS_SPAWN_IMAGE: return sysSpawnImage(c);
     case Abi::SYS_SYSTEM_INFO: return sysSystemInfo(c, *bootInfo);
     case Abi::SYS_RANDOM: return sysRandom(c);
     case Abi::SYS_FILE_OPEN: return sysFileOpen(c);

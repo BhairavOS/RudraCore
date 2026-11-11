@@ -1,0 +1,5 @@
+id = clock
+title = Clock
+version = 1.0
+author = Bhairav OS examples
+description = An analog clock with the time and date in digits below it.

@@ -11,9 +11,13 @@
 // window's pixels in shared memory, and the shell composes every window
 // onto the screen (see kapala/protocol/shell.h).
 //
+// Apps are either built in (in the boot image) or installed on the disk in
+// /apps/<id>/ (kapala/apps.h); both kinds appear in the dock and the app
+// grid and start the same way.
+//
 // The desktop: a thin bar at the top (the lotus menu, the active app, the
-// network and the clock), a floating dock at the bottom (every app, with a
-// dot under the running ones), and windows in between, with their controls
+// network and the clock), a floating dock at the bottom (apps, a dot under
+// the running ones, and the app grid), and windows in between, with their controls
 // at the top left: close, minimize, maximize.
 //
 // Drawing: everything that changes adds its rectangle to the damage; once
@@ -21,8 +25,11 @@
 // to top, bars, dock, menus) into a back buffer and copied to the screen,
 // with the mouse cursor drawn on top.
 
+#include <kapala/apps.h>
 #include <kapala/channel.h>
+#include <kapala/files.h>
 #include <kapala/gfx.h>
+#include <kapala/image.h>
 #include <kapala/net.h>
 #include <kapala/protocol/fs.h>
 #include <kapala/protocol/input.h>
@@ -57,9 +64,14 @@ constexpr int SHADOW_MARGIN = SHADOW + 8;
 constexpr int DOCK_ICON = 46;
 constexpr int DOCK_GAP = 12;
 constexpr int DOCK_PAD = 10;
+constexpr int DOCK_SEPARATOR = 18;                   // extra room around the separators
 constexpr int DOCK_H = DOCK_ICON + 2 * DOCK_PAD + 6; // room for the running dots
 constexpr int DOCK_BOTTOM = 8;                       // space under the dock
 constexpr int DOCK_RESERVE = DOCK_H + DOCK_BOTTOM + 6; // kept free of maximized windows
+constexpr int MAX_DOCK_INSTALLED = 6;                  // more are in the app grid
+
+constexpr int GRID_ICON = 64, GRID_CELL_W = 124, GRID_CELL_H = 112, GRID_COLUMNS = 6;
+constexpr int MAX_INSTALLED = 24;
 
 constexpr int MIN_W = 260, MIN_H = 160;
 constexpr unsigned long DOUBLE_CLICK_MS = 450;
@@ -74,15 +86,14 @@ struct AppEntry {
 };
 
 constexpr AppEntry APPS[] = {
-    {"browser", "Browser"}, {"files", "Files"},     {"terminal", "Terminal"},
-    {"notes", "Notes"},     {"monitor", "Monitor"}, {"about", "About Bhairav OS"},
+    {"browser", "Browser"}, {"files", "Files"},     {"terminal", "Terminal"}, {"notes", "Notes"},
+    {"monitor", "Monitor"}, {"store", "App Store"}, {"about", "About Bhairav OS"},
 };
 constexpr int APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 
 // The lotus menu.
-enum MenuItem { MENU_ABOUT, MENU_MONITOR, MENU_TERMINAL, MENU_SEPARATOR, MENU_SHOW_DESKTOP, MENU_COUNT };
-constexpr char const* MENU_LABELS[MENU_COUNT] = {"About Bhairav OS", "System Monitor", "Terminal", "",
-                                                 "Show Desktop"};
+enum MenuItem { MENU_ABOUT, MENU_APPS, MENU_STORE, MENU_SEPARATOR, MENU_SHOW_DESKTOP, MENU_COUNT };
+constexpr char const* MENU_LABELS[MENU_COUNT] = {"About Bhairav OS", "All Apps", "App Store", "", "Show Desktop"};
 
 // The mouse cursor: X = outline, . = fill.
 constexpr char const* CURSOR[] = {
@@ -123,8 +134,8 @@ struct Window {
     Channel channel;
     Bitmap surface;
     char title[48] = {};
+    char program[24] = {}; // what was started (built-in name or installed app id)
     Rect frame;
-    int app = -1; // index in APPS, or -1
     bool resizable = false;
     bool maximized = false;
     bool minimized = false;
@@ -142,6 +153,22 @@ struct Window {
                 frame.h + 2 * SHADOW_MARGIN + 10};
     }
     bool shown() const { return visible and not minimized; }
+};
+
+// An app installed on the disk.
+struct Installed {
+    AppInfo info;
+    Image icon;     // as in its package (empty if it has none)
+    Image dockIcon; // scaled for the dock
+    Image gridIcon; // scaled for the app grid
+};
+
+// Something in the dock or the grid: a built-in app, an installed one, or
+// (dock only) the button that opens the grid.
+struct Slot {
+    enum Kind : unsigned char { BuiltIn, InstalledApp, Grid } kind;
+    int index;
+    int x; // dock: left edge
 };
 
 class Shell {
@@ -164,13 +191,21 @@ public:
         _input = Channel(INPUT);
         _mouse = _drawnMouse = {_screen.width / 2, _screen.height / 2};
 
-        // Our own network connection, for the status in the top bar.
+        // Our own connections: the network (for the status in the top bar)
+        // and the files (for installed apps).
         Channel mine, theirs;
         Channel::createPair(mine, theirs);
         if (Sys::send(NETWORK, &CONNECT_NET, sizeof(CONNECT_NET), theirs.handle()) == Sys::OK) {
             theirs.release();
             _netOk = _net.connect(mine.release());
         }
+        Channel filesMine, filesTheirs;
+        Channel::createPair(filesMine, filesTheirs);
+        if (Sys::send(FILES, &CONNECT, sizeof(CONNECT), filesTheirs.handle()) == Sys::OK) {
+            filesTheirs.release();
+            _filesOk = _files.connect(filesMine.release());
+        }
+        rescanApps();
         damage(_screen.bounds());
         flush();
         return true;
@@ -211,6 +246,90 @@ public:
     }
 
 private:
+    // MARK: Installed apps
+
+    void rescanApps() {
+        for (int j = 0; j < _installedCount; j++)
+            _installed[j] = Installed{};
+        _installedCount = 0;
+        if (_filesOk) {
+            static AppInfo infos[MAX_INSTALLED];
+            long n = listApps(_files, infos, MAX_INSTALLED);
+            for (long j = 0; j < n; j++) {
+                Installed& app = _installed[_installedCount++];
+                app.info = infos[j];
+                Text<96> path;
+                path.add("/apps/").add(app.info.id).add("/icon.png");
+                unsigned long length = 0;
+                unsigned char* png = readWholeFile(_files, path.cstr(), length, 2 * 1024 * 1024);
+                if (png and Image::decode(png, length, app.icon, 1024 * 1024)) {
+                    app.icon.scaled(DOCK_ICON, DOCK_ICON, app.dockIcon);
+                    app.icon.scaled(GRID_ICON, GRID_ICON, app.gridIcon);
+                }
+                delete[] png;
+            }
+        }
+        layoutDock();
+        damage(_screen.bounds());
+    }
+
+    // Starts an installed app: its program is read from the disk into
+    // shared memory, and the kernel loads it from there.
+    long startInstalled(char const* id, Sys::Handle const* give, unsigned long count) {
+        if (not _filesOk)
+            return Sys::NOT_FOUND;
+        Text<96> path;
+        path.add("/apps/").add(id).add("/app.elf");
+        FileInfo info{};
+        if (_files.stat(path.cstr(), info) < 0 or info.directory or info.size == 0 or info.size > MAX_APP_SIZE)
+            return Sys::NOT_FOUND;
+        long memory = Sys::memoryCreate(info.size);
+        if (memory < 0)
+            return memory;
+        void* bytes = Sys::memoryMap(static_cast<Sys::Handle>(memory));
+        long result = Sys::OUT_OF_MEMORY;
+        if (bytes and _files.read(path.cstr(), bytes, info.size) == static_cast<long>(info.size)) {
+            Sys::SpawnImage request{};
+            request.memory = static_cast<Sys::Handle>(memory);
+            request.size = info.size;
+            copyString(request.name, sizeof(request.name), id);
+            for (unsigned long i = 0; i < count; i++)
+                request.handles[i] = give[i];
+            request.handleCount = count;
+            result = Sys::spawnImage(request);
+        }
+        if (bytes)
+            Sys::memoryUnmap(bytes);
+        Sys::close(static_cast<Sys::Handle>(memory));
+        return result;
+    }
+
+    int findInstalled(char const* id) const {
+        for (int j = 0; j < _installedCount; j++) {
+            if (sameString(_installed[j].info.id, id))
+                return j;
+        }
+        return -1;
+    }
+
+    int findBuiltIn(char const* program) const {
+        for (int k = 0; k < APP_COUNT; k++) {
+            if (sameString(APPS[k].program, program))
+                return k;
+        }
+        return -1;
+    }
+
+    char const* programOf(Slot const& s) const {
+        return s.kind == Slot::BuiltIn ? APPS[s.index].program : _installed[s.index].info.id;
+    }
+
+    char const* nameOf(Slot const& s) const {
+        if (s.kind == Slot::Grid)
+            return "All Apps";
+        return s.kind == Slot::BuiltIn ? APPS[s.index].name : _installed[s.index].info.title;
+    }
+
     // MARK: Apps and windows
 
     void launch(char const* program, char const* argument = "") {
@@ -239,24 +358,26 @@ private:
         if (Sys::send(NETWORK, &CONNECT_NET, sizeof(CONNECT_NET), netServer.handle()) == Sys::OK)
             netServer.release(); // moved to net
 
-        Sys::Handle give[] = {theirs.release(), files.release(), net.release()};
-        if (Sys::spawn(program, give, 3) < 0) {
-            for (Sys::Handle h : give)
-                Sys::close(h); // (not moved: spawn changes nothing when it fails)
+        // Built-in programs first (an installed app can't replace one).
+        Sys::Handle give[] = {theirs.handle(), files.handle(), net.handle()};
+        long result = Sys::spawn(program, give, 3);
+        if (result == Sys::NOT_FOUND)
+            result = startInstalled(program, give, 3);
+        if (result < 0) {
             Text<> message;
             message.add("can't start ").add(program);
             Sys::log(message.cstr());
-            return;
+            return; // (not moved: the channels close on their own)
         }
+        theirs.release();
+        files.release();
+        net.release();
         _windows[slot] = {};
         _windows[slot].used = true;
         _windows[slot].channel = static_cast<Channel&&>(mine);
         copyString(_windows[slot].argument, sizeof(_windows[slot].argument), argument);
-        for (int k = 0; k < APP_COUNT; k++) {
-            if (sameString(APPS[k].program, program))
-                _windows[slot].app = k;
-        }
-        damage(dockRect());
+        copyString(_windows[slot].program, sizeof(_windows[slot].program), program);
+        damage(dockArea());
     }
 
     void send(int i, ShellMessage const& message) { _windows[i].channel.send(message); }
@@ -311,6 +432,7 @@ private:
                 launch(program, argument);
                 break;
             }
+            case ShellType::AppsChanged: rescanApps(); break;
             default:
                 break;
             }
@@ -383,7 +505,7 @@ private:
         if (_hoverControls == i)
             _hoverControls = -1;
         _windows[i] = {}; // closes the channel
-        damage(dockRect());
+        damage(dockArea());
         damage(topBarRect());
         updateFocus();
     }
@@ -444,7 +566,7 @@ private:
             return;
         w.minimized = true;
         damage(w.area());
-        damage(dockRect());
+        damage(dockArea());
         if (_hoverControls == i)
             _hoverControls = -1;
         updateFocus();
@@ -457,7 +579,7 @@ private:
             damage(w.area());
         }
         raise(i);
-        damage(dockRect());
+        damage(dockArea());
     }
 
     // MARK: Stacking and focus
@@ -505,7 +627,7 @@ private:
             damage(_windows[_focused].area());
         }
         damage(topBarRect());
-        damage(dockRect());
+        damage(dockArea());
     }
 
     int windowAt(Point p) const {
@@ -538,10 +660,13 @@ private:
     }
 
     void onKey(InputEvent const& e) {
-        if (e.pressed and e.character == 0x1b and _menuOpen) { // Escape
+        if (e.pressed and e.character == 0x1b and (_menuOpen or _gridOpen)) { // Escape
             setMenu(false);
+            setGrid(false);
             return;
         }
+        if (_gridOpen)
+            return;
         int f = top();
         if (f < 0)
             return;
@@ -561,7 +686,7 @@ private:
         _buttons = e.buttons;
         bool isDown = _buttons & Protocol::MOUSE_LEFT;
 
-        if (e.wheel)
+        if (e.wheel and not _gridOpen)
             forwardMouse(ShellType::Wheel, e.wheel);
 
         Rect work = workArea();
@@ -584,7 +709,7 @@ private:
             w.frame.x = clampInt(_mouse.x - _dragOffset.x, 80 - w.frame.w, _screen.width - 80);
             w.frame.y = clampInt(_mouse.y - _dragOffset.y, TOPBAR_H, _screen.height - TITLE_H - 10);
             damage(w.area());
-        } else {
+        } else if (not _gridOpen) {
             forwardMouse(ShellType::MouseMove);
         }
 
@@ -620,6 +745,13 @@ private:
     }
 
     void onPress() {
+        if (_gridOpen) {
+            int item = gridItemAt(_mouse);
+            setGrid(false);
+            if (item >= 0)
+                openSlot(gridSlot(item));
+            return;
+        }
         if (_menuOpen) {
             if (menuRect().contains(_mouse)) {
                 if (_hoverMenu >= 0)
@@ -641,7 +773,7 @@ private:
         if (dockRect().contains(_mouse)) {
             int k = dockItemAt(_mouse);
             if (k >= 0)
-                openApp(k);
+                openSlot(_dock[k]);
             return;
         }
 
@@ -693,25 +825,39 @@ private:
         }
     }
 
-    // A dock icon: bring its app's windows forward (restoring a minimized
-    // one), or start it if it isn't running.
-    void openApp(int k) {
-        int best = -1;
-        for (int o = _orderCount - 1; o >= 0 and best < 0; o--) { // the most recently used first
-            if (_windows[_order[o]].visible and _windows[_order[o]].app == k)
-                best = _order[o];
+    // A dock or grid item: bring its app's windows forward (restoring a
+    // minimized one), or start it if it isn't running.
+    void openProgram(char const* program) {
+        for (int o = _orderCount - 1; o >= 0; o--) { // the most recently used first
+            Window const& w = _windows[_order[o]];
+            if (w.visible and sameString(w.program, program)) {
+                restoreWindow(_order[o]);
+                return;
+            }
         }
-        if (best >= 0)
-            restoreWindow(best);
+        launch(program);
+    }
+
+    void openSlot(Slot const& s) {
+        if (s.kind == Slot::Grid)
+            setGrid(not _gridOpen);
         else
-            launch(APPS[k].program);
+            openProgram(programOf(s));
+    }
+
+    bool isRunning(char const* program) const {
+        for (int i = 0; i < MAX_WINDOWS; i++) {
+            if (_windows[i].used and sameString(_windows[i].program, program))
+                return true;
+        }
+        return false;
     }
 
     void chooseMenu(int item) {
         switch (item) {
-        case MENU_ABOUT: openApp(5); break;
-        case MENU_MONITOR: openApp(4); break;
-        case MENU_TERMINAL: launch("terminal"); break;
+        case MENU_ABOUT: openProgram("about"); break;
+        case MENU_APPS: setGrid(true); break;
+        case MENU_STORE: openProgram("store"); break;
         case MENU_SHOW_DESKTOP:
             for (int i = 0; i < MAX_WINDOWS; i++) {
                 if (_windows[i].shown())
@@ -723,10 +869,15 @@ private:
     }
 
     void updateHover() {
-        int dock = dockRect().contains(_mouse) ? dockItemAt(_mouse) : -1;
+        int dock = not _gridOpen and dockRect().contains(_mouse) ? dockItemAt(_mouse) : -1;
         if (dock != _hoverDock) {
-            damage(dockRect().inset(-40)); // (the label floats above)
+            damage(dockArea());
             _hoverDock = dock;
+        }
+        int grid = _gridOpen ? gridItemAt(_mouse) : -1;
+        if (grid != _hoverGrid) {
+            damage(gridRect());
+            _hoverGrid = grid;
         }
         int menu = -1;
         if (_menuOpen) {
@@ -741,7 +892,7 @@ private:
         }
         // The controls show their symbols while the pointer is over them.
         int controls = -1;
-        int under = windowAt(_mouse);
+        int under = _gridOpen ? -1 : windowAt(_mouse);
         if (under >= 0 and _windows[under].controls().contains(_mouse))
             controls = under;
         if (controls != _hoverControls) {
@@ -768,27 +919,85 @@ private:
         damage(lotusRect());
     }
 
+    void setGrid(bool open) {
+        if (open == _gridOpen)
+            return;
+        _gridOpen = open;
+        _hoverGrid = -1;
+        damage(_screen.bounds()); // the whole screen dims behind it
+    }
+
     // MARK: Layout
 
     Rect topBarRect() const { return {0, 0, _screen.width, TOPBAR_H}; }
     Rect lotusRect() const { return {8, 2, 98, TOPBAR_H - 4}; }
 
-    Rect dockRect() const {
-        int w = APP_COUNT * DOCK_ICON + (APP_COUNT - 1) * DOCK_GAP + 2 * DOCK_PAD;
-        return {(_screen.width - w) / 2, _screen.height - DOCK_BOTTOM - DOCK_H, w, DOCK_H};
+    // The dock's items: built-in apps, then installed ones (after a
+    // separator), then the app grid button (after another).
+    void layoutDock() {
+        _dockCount = 0;
+        int x = DOCK_PAD;
+        for (int k = 0; k < APP_COUNT; k++) {
+            _dock[_dockCount++] = {Slot::BuiltIn, k, x};
+            x += DOCK_ICON + DOCK_GAP;
+        }
+        int shownInstalled = _installedCount < MAX_DOCK_INSTALLED ? _installedCount : MAX_DOCK_INSTALLED;
+        if (shownInstalled)
+            x += DOCK_SEPARATOR;
+        for (int j = 0; j < shownInstalled; j++) {
+            _dock[_dockCount++] = {Slot::InstalledApp, j, x};
+            x += DOCK_ICON + DOCK_GAP;
+        }
+        x += DOCK_SEPARATOR;
+        _dock[_dockCount++] = {Slot::Grid, 0, x};
+        _dockWidth = x + DOCK_ICON + DOCK_PAD;
     }
+
+    Rect dockRect() const {
+        return {(_screen.width - _dockWidth) / 2, _screen.height - DOCK_BOTTOM - DOCK_H, _dockWidth, DOCK_H};
+    }
+
+    // The dock, its labels and lifted icons included.
+    Rect dockArea() const { return dockRect().inset(-40); }
 
     Rect dockIcon(int k) const {
         Rect d = dockRect();
         int lift = k == _hoverDock ? 4 : 0;
-        return {d.x + DOCK_PAD + k * (DOCK_ICON + DOCK_GAP), d.y + DOCK_PAD - lift, DOCK_ICON, DOCK_ICON};
+        return {d.x + _dock[k].x, d.y + DOCK_PAD - lift, DOCK_ICON, DOCK_ICON};
     }
 
     int dockItemAt(Point p) const {
         Rect d = dockRect();
-        for (int k = 0; k < APP_COUNT; k++) {
-            Rect cell{d.x + DOCK_PAD + k * (DOCK_ICON + DOCK_GAP) - DOCK_GAP / 2, d.y, DOCK_ICON + DOCK_GAP, d.h};
+        for (int k = 0; k < _dockCount; k++) {
+            Rect cell{d.x + _dock[k].x - DOCK_GAP / 2, d.y, DOCK_ICON + DOCK_GAP, d.h};
             if (cell.contains(p))
+                return k;
+        }
+        return -1;
+    }
+
+    // The app grid: every app, built-in and installed.
+    int gridCount() const { return APP_COUNT + _installedCount; }
+
+    Slot gridSlot(int item) const {
+        return item < APP_COUNT ? Slot{Slot::BuiltIn, item, 0} : Slot{Slot::InstalledApp, item - APP_COUNT, 0};
+    }
+
+    Rect gridRect() const {
+        int rows = (gridCount() + GRID_COLUMNS - 1) / GRID_COLUMNS;
+        int w = GRID_COLUMNS * GRID_CELL_W + 48, h = rows * GRID_CELL_H + 92;
+        return {(_screen.width - w) / 2, TOPBAR_H + (workArea().h - h) / 2, w, h};
+    }
+
+    Rect gridCell(int item) const {
+        Rect g = gridRect();
+        return {g.x + 24 + (item % GRID_COLUMNS) * GRID_CELL_W, g.y + 68 + (item / GRID_COLUMNS) * GRID_CELL_H,
+                GRID_CELL_W, GRID_CELL_H};
+    }
+
+    int gridItemAt(Point p) const {
+        for (int k = 0; k < gridCount(); k++) {
+            if (gridCell(k).contains(p))
                 return k;
         }
         return -1;
@@ -865,6 +1074,8 @@ private:
         }
         drawTopBar(c);
         drawDock(c);
+        if (_gridOpen)
+            drawGrid(c);
         if (_menuOpen)
             drawMenu(c);
     }
@@ -992,7 +1203,8 @@ private:
         int f = top();
         if (f >= 0) {
             Window const& w = _windows[f];
-            char const* name = w.app >= 0 ? APPS[w.app].name : w.title;
+            int k = findBuiltIn(w.program), j = findInstalled(w.program);
+            char const* name = k >= 0 ? APPS[k].name : j >= 0 ? _installed[j].info.title : w.title;
             c.text({lotus.right() + 12, textY}, name, Theme::TEXT, font);
         }
 
@@ -1038,33 +1250,88 @@ private:
 
     void drawDock(Canvas& c) {
         Rect d = dockRect();
-        if (d.inset(-40).intersect(c.clip).empty())
+        if (dockArea().intersect(c.clip).empty())
             return;
         frosted(c, d, 20, 175); // (no shadow: it would show through the glass)
         c.strokeRounded(d, 20, 1, Theme::HAIRLINE);
 
-        for (int k = 0; k < APP_COUNT; k++) {
-            drawAppIcon(c, k, dockIcon(k));
-            bool running = false;
-            for (int i = 0; i < MAX_WINDOWS; i++)
-                running = running or (_windows[i].used and _windows[i].app == k);
-            if (running) {
-                int cx = d.x + DOCK_PAD + k * (DOCK_ICON + DOCK_GAP) + DOCK_ICON / 2;
-                c.fillCircle(float(cx), d.bottom() - 6.0f, 2.2f, Theme::TEXT.withAlpha(220));
-            }
+        for (int k = 0; k < _dockCount; k++) {
+            Slot const& slot = _dock[k];
+            Rect icon = dockIcon(k);
+            // A thin line before the installed apps and before the grid.
+            if (k > 0 and slot.kind != _dock[k - 1].kind)
+                c.fill({d.x + slot.x - DOCK_SEPARATOR / 2 - DOCK_GAP / 2, d.y + 14, 1, d.h - 28}, Theme::HAIRLINE);
+            drawSlotIcon(c, slot, icon, false);
+            if (slot.kind != Slot::Grid and isRunning(programOf(slot)))
+                c.fillCircle(icon.x + DOCK_ICON / 2.0f, d.bottom() - 6.0f, 2.2f, Theme::TEXT.withAlpha(220));
         }
 
         // The name of the app under the pointer, floating above the dock.
         if (_hoverDock >= 0) {
             Font const& font = Font::system();
-            char const* name = APPS[_hoverDock].name;
+            char const* name = nameOf(_dock[_hoverDock]);
             Rect icon = dockIcon(_hoverDock);
             int w = font.measure(name) + 20, h = font.height + 10;
             Rect pill{icon.x + icon.w / 2 - w / 2, d.y - h - 8, w, h};
-            c.shadow(pill, 8, 8, Color::hex(0x000000, 90));
             c.fillRounded(pill, 8, Color::hex(0x1E1C25, 235));
             c.strokeRounded(pill, 8, 1, Theme::HAIRLINE);
             c.text({pill.x + 10, pill.y + 5}, name, Theme::TEXT);
+        }
+    }
+
+    void drawSlotIcon(Canvas& c, Slot const& slot, Rect tile, bool large) {
+        if (slot.kind == Slot::BuiltIn) {
+            drawAppIcon(c, slot.index, tile);
+            return;
+        }
+        if (slot.kind == Slot::Grid) { // nine dots on a glass tile
+            c.fillRounded(tile, 12, Theme::WHITE.withAlpha(30));
+            for (int row = 0; row < 3; row++)
+                for (int col = 0; col < 3; col++)
+                    c.fillCircle(tile.x + tile.w / 2.0f + (col - 1) * 10.0f, tile.y + tile.h / 2.0f + (row - 1) * 10.0f,
+                                 3.0f, Theme::TEXT);
+            return;
+        }
+        Installed const& app = _installed[slot.index];
+        Image const& img = large ? app.gridIcon : app.dockIcon;
+        if (img.pixels) {
+            c.image({tile.x, tile.y}, img.pixels, img.width, img.height);
+            return;
+        }
+        // No icon: its first letter on a tile.
+        c.fillRoundedGradient(tile, tile.w * 12 / 56.0f, Color::hex(0x6A5ACD), Color::hex(0x8E5BC9));
+        char first = app.info.title[0];
+        char letter[2] = {first >= 'a' and first <= 'z' ? static_cast<char>(first - 32) : first, 0};
+        Font const& font = Font::get("sans-bold", large ? 28 : 22);
+        c.text({tile.x + (tile.w - font.measure(letter)) / 2, tile.y + (tile.h - font.height) / 2}, letter,
+               Theme::WHITE, font);
+    }
+
+    // All apps, over a dimmed screen.
+    void drawGrid(Canvas& c) {
+        c.fill(_screen.bounds(), Color::hex(0x000000, 110));
+        Rect g = gridRect();
+        c.shadow(g, 18, 26, Color::hex(0x000000, 140));
+        c.fillRounded(g, 18, Color::hex(0x1E1C25, 240));
+        c.strokeRounded(g, 18, 1, Theme::HAIRLINE);
+        c.text({g.x + 28, g.y + 22}, "All Apps", Theme::TEXT, Font::get("sans-bold", 18));
+        Font const& font = Font::system();
+        for (int k = 0; k < gridCount(); k++) {
+            Rect cell = gridCell(k);
+            if (k == _hoverGrid)
+                c.fillRounded(cell.inset(4), 12, Theme::WHITE.withAlpha(18));
+            Rect tile{cell.x + (cell.w - GRID_ICON) / 2, cell.y + 10, GRID_ICON, GRID_ICON};
+            drawSlotIcon(c, gridSlot(k), tile, true);
+            // The name, cut short with "..." if it doesn't fit.
+            char name[40];
+            copyString(name, sizeof(name), nameOf(gridSlot(k)));
+            unsigned long n = Sys::length(name);
+            while (n > 4 and font.measure(name) > cell.w - 12) {
+                n--;
+                name[n] = '\0';
+                name[n - 1] = name[n - 2] = name[n - 3] = '.';
+            }
+            c.text({cell.x + (cell.w - font.measure(name)) / 2, tile.bottom() + 8}, name, Theme::TEXT);
         }
     }
 
@@ -1112,6 +1379,16 @@ private:
             int heights[] = {10, 18, 13, 26, 20, 30};
             for (int b = 0; b < 6; b++)
                 c.fillRounded(R(11 + b * 6, 44 - heights[b], 4, heights[b]), 2 * u, ink.withAlpha(230));
+            break;
+        }
+        case 5: { // App Store: an arrow down into a tray
+            c.fillRoundedGradient(tile, radius, Color::hex(0x9B5DE5), Color::hex(0x6C4AD6));
+            c.fillRounded(R(25, 11, 6, 18), 3 * u, ink);
+            for (int row = 0; row < 8; row++) // the arrow head
+                c.fill(R(20 + row, 24 + row, 16 - 2 * row, 1), ink);
+            c.fillRounded(R(13, 38, 30, 4), 2 * u, ink);
+            c.fillRounded(R(13, 31, 4, 11), 2 * u, ink);
+            c.fillRounded(R(39, 31, 4, 11), 2 * u, ink);
             break;
         }
         default: // About: the lotus
@@ -1179,8 +1456,13 @@ private:
     Point _dragOffset;
     int _captured = -1; // the window a mouse press started in
 
-    bool _menuOpen = false, _hoverLotus = false;
-    int _hoverMenu = -1, _hoverDock = -1, _hoverControls = -1;
+    Installed _installed[MAX_INSTALLED];
+    int _installedCount = 0;
+    Slot _dock[APP_COUNT + MAX_DOCK_INSTALLED + 1];
+    int _dockCount = 0, _dockWidth = 0;
+
+    bool _menuOpen = false, _gridOpen = false, _hoverLotus = false;
+    int _hoverMenu = -1, _hoverDock = -1, _hoverGrid = -1, _hoverControls = -1;
 
     int _resizing = -1; // the window whose corner is being dragged
     Rect _resizeRect;   // its outline
@@ -1188,7 +1470,8 @@ private:
     unsigned long _lastClickTime = 0;
 
     Net _net;
-    bool _netOk = false, _netUp = false;
+    Files _files;
+    bool _netOk = false, _netUp = false, _filesOk = false;
     unsigned _netAddress = 0;
 
     unsigned long _clockSecond = 0, _clockMinute = 0;

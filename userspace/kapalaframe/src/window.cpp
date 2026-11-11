@@ -81,6 +81,12 @@ bool Window::resize(int width, int height) {
     return true;
 }
 
+void Window::appsChanged() {
+    Message message{};
+    message.type = Type::AppsChanged;
+    _shell.send(message);
+}
+
 void Window::launch(char const* program, char const* argument) {
     Message message{};
     message.type = Type::Launch;

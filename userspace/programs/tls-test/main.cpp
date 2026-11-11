@@ -4,6 +4,7 @@
 //   handle 1: a connection to the net server
 
 #include <kapala/crypto.h>
+#include <kapala/http.h>
 #include <kapala/net.h>
 #include <kapala/sys.h>
 #include <kapala/text.h>
@@ -159,5 +160,21 @@ int main() {
             t.add("failed, error ").add(status).add(" (").add(detail.cstr()).add(")");
         Sys::log(t.cstr());
     }
+
+    // The download helper apps use (redirects, chunked bodies, TLS).
+    unsigned char* body = nullptr;
+    unsigned long size = 0;
+    char const* why = "";
+    long r = httpGet(net, "https://example.com/", body, size, why);
+    bool found = false;
+    for (unsigned long i = 0; r == Sys::OK and i + 14 <= size and not found; i++)
+        found = C::equal(body + i, "Example Domain", 14);
+    Text<200> t;
+    if (found)
+        t.add("tls check: httpGet downloaded https://example.com/ (").add(size).add(" bytes)");
+    else
+        t.add("tls check: FAILED: httpGet (").add(why).add(")");
+    Sys::log(t.cstr());
+    delete[] body;
     return 0;
 }

@@ -54,6 +54,9 @@ public:
     // Asks the shell to start another app, e.g. launch("notes", "/a.txt").
     void launch(char const* program, char const* argument = "");
 
+    // Tells the shell apps were installed or removed (kapala/apps.h).
+    void appsChanged();
+
     // The window's pixels: draw here, then present().
     Gfx::Bitmap& surface() { return _surface; }
     int width() const { return _surface.width; }

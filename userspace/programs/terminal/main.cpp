@@ -9,7 +9,9 @@
 // (open, edit, browse). Type "help" for the list. Up/Down recall earlier
 // commands; the wheel or Page Up/Down scroll back.
 
+#include <kapala/apps.h>
 #include <kapala/files.h>
+#include <kapala/http.h>
 #include <kapala/net.h>
 #include <kapala/protocol/input.h>
 #include <kapala/sys.h>
@@ -310,7 +312,7 @@ private:
             print("Files:   ls [folder]  cd folder  pwd  cat file  write file text...  mkdir folder  rm path", OUTPUT);
             print("Network: ip  ping host [count]  host name  get http(s)://address", OUTPUT);
             print("System:  date  uptime  mem  echo text...  clear", OUTPUT);
-            print("Apps:    open browser|files|notes|monitor|about|terminal  edit file  browse address", OUTPUT);
+            print("Apps:    open app  edit file  browse address  apps  install file|address  uninstall app", OUTPUT);
         } else if (same(cmd, "clear")) {
             _count = 0;
             _first = 0;
@@ -392,15 +394,32 @@ private:
             print(t);
         } else if (same(cmd, "open")) {
             if (n < 2)
-                return error("usage: open browser|files|notes|monitor|about|terminal");
-            static constexpr char const* APPS[] = {"browser", "files", "notes", "monitor", "about", "terminal"};
-            for (char const* app : APPS) {
-                if (same(w[1], app)) {
-                    _window.launch(app);
-                    return;
-                }
+                return error("usage: open app (browser, files, notes, monitor, store, about, terminal, or an installed one)");
+            _window.launch(w[1]); // built-in or installed: the shell finds it
+        } else if (same(cmd, "apps")) {
+            static AppInfo apps[32];
+            long count = listApps(_files, apps, 32);
+            if (count <= 0)
+                print("No apps installed. Try the App Store, or: install /path/to/app.bpk", Theme::TEXT_DIM);
+            for (long i = 0; i < count; i++) {
+                Text<200> t;
+                t.add("  ").add(apps[i].id).add("  ").add(apps[i].title).add(" ").add(apps[i].version);
+                if (apps[i].author[0])
+                    t.add("  (by ").add(apps[i].author).add(")");
+                print(t);
             }
-            error("no such app");
+        } else if (same(cmd, "install")) {
+            if (n < 2)
+                return error("usage: install /path/app.bpk  or  install https://.../app.bpk");
+            installApp(w[1]);
+        } else if (same(cmd, "uninstall")) {
+            if (n < 2)
+                return error("usage: uninstall app");
+            long r = uninstallApp(_files, w[1]);
+            if (r < 0)
+                return errorCode(w[1], r);
+            _window.appsChanged();
+            print("removed", GOOD);
         } else if (same(cmd, "edit")) {
             if (n < 2)
                 return error("usage: edit file");
@@ -414,6 +433,41 @@ private:
             t.add(cmd).add(": unknown command (try \"help\")");
             error(t.cstr());
         }
+    }
+
+    void installApp(char const* source) {
+        unsigned char* data = nullptr;
+        unsigned long size = 0;
+        char const* why = "";
+        bool web = source[0] == 'h' and source[1] == 't' and source[2] == 't' and source[3] == 'p';
+        if (web) {
+            print("downloading...", Theme::TEXT_DIM);
+            redraw();
+            if (httpGet(_net, source, data, size, why) < 0) {
+                Text<200> t;
+                t.add("download failed: ").add(why);
+                return error(t.cstr());
+            }
+        } else {
+            char path[96];
+            resolve(source, path, sizeof(path));
+            data = readWholeFile(_files, path, size);
+            if (not data)
+                return error("can't read that file");
+        }
+        AppInfo info;
+        long r = installPackage(_files, data, size, info, why);
+        delete[] data;
+        if (r < 0) {
+            Text<200> t;
+            t.add("install failed: ").add(why);
+            return error(t.cstr());
+        }
+        _window.appsChanged();
+        Text<160> t;
+        t.add("installed ").add(info.title).add(" ").add(info.version).add(": type \"open ").add(info.id)
+            .add("\" or find it in the dock");
+        print(t.cstr(), GOOD);
     }
 
     static long number(char const* s) {
