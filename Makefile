@@ -29,7 +29,7 @@ CXXFLAGS := $(COMMON_FLAGS) -mcmodel=kernel -mno-red-zone \
 	-Ikernel/src -I$(BUILD) -isystem $(LIMINE_PROTO)
 
 # User programs get SSE2 and floating point.
-USER_CXXFLAGS := $(COMMON_FLAGS) -msse2 -fno-math-errno -Iuserspace/kapalaframe/include
+USER_CXXFLAGS := $(COMMON_FLAGS) -msse2 -fno-math-errno -Iuserspace/kapalaframe/include -I$(BUILD)
 
 ASFLAGS := --target=x86_64-unknown-none-elf
 
@@ -134,9 +134,12 @@ $(BUILD)/logo.rgba: assets/bhairav-logo.jpg
 # Build options as a header. Only rewritten when an option changes, so only
 # the files that include it get rebuilt.
 #   PANIC_TEST=1  makes the kernel fault on purpose to show the panic screen.
+#   SECURITY_TEST=1  init first runs oom-test (a program uses up all memory;
+#                    the kernel must refuse it, not panic).
 $(BUILD)/config.h: FORCE
 	@mkdir -p $(@D)
 	@echo '#define RUDRACORE_PANIC_TEST $(if $(PANIC_TEST),1,0)' > $@.tmp
+	@echo '#define BHAIRAV_SECURITY_TEST $(if $(SECURITY_TEST),1,0)' >> $@.tmp
 	@cmp -s $@.tmp $@ || mv $@.tmp $@
 	@rm -f $@.tmp
 
@@ -153,7 +156,7 @@ $(KERNEL): $(OBJS) kernel/linker.ld
 	$(LD) $(LDFLAGS) $(OBJS) -o $@
 
 # User objects
-$(BUILD)/userspace/%.cpp.o: userspace/%.cpp
+$(BUILD)/userspace/%.cpp.o: userspace/%.cpp | $(BUILD)/config.h
 	@mkdir -p $(@D)
 	$(CXX) $(USER_CXXFLAGS) -c $< -o $@
 
