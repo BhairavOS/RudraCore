@@ -6,8 +6,8 @@ namespace Rudracore::Core {
 
 Endpoint::~Endpoint() {
     while (not empty()) {
-        if (front().attached)
-            front().attached->unref();
+        if (front().attached.object)
+            front().attached.object->unref();
         pop();
     }
 
@@ -32,14 +32,14 @@ void Endpoint::push(Message const& message) {
 }
 
 void Endpoint::pop() {
-    queue[head].attached = nullptr;
+    queue[head].attached = {};
     head = (head + 1) % QUEUE_CAPACITY;
     count--;
 }
 
 bool Endpoint::holdsLinks() const {
     for (u32 i = 0; i < count; i++) {
-        Object const* attached = queue[(head + i) % QUEUE_CAPACITY].attached;
+        Object const* attached = queue[(head + i) % QUEUE_CAPACITY].attached.object;
         if (attached and (attached->type == ObjectType::Channel or attached->type == ObjectType::Irq))
             return true;
     }

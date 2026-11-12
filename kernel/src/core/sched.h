@@ -45,27 +45,36 @@ struct Task {
     u64 waitDeadline = 0; // while in a timed SYS_WAIT: when it gives up (0 = none)
     i64 exitCode = 0;
 
-    Task* next = nullptr; // link in the ready, sleep or zombie list
+    Task* next = nullptr;    // link in the ready, sleep or zombie list
+    Task* allNext = nullptr; // link in the list of every task (Sched::allTasks)
 
     // Floating point / SSE registers while the task isn't running (FXSAVE
     // format, must be 16-byte aligned).
     alignas(16) u8 fpuState[512];
 
-    Object* handles[MAX_HANDLES] = {}; // slot 0 is never used
+    // A handle's value is (generation << 8) | slot; the generation counts
+    // how often the slot was freed, so a stale value never matches.
+    struct HandleSlot {
+        Capability cap;
+        u64 generation = 0;
+    };
+    HandleSlot handles[MAX_HANDLES] = {}; // slot 0 is never used
     Mapping mappings[MAX_MAPPINGS] = {};
     u64 nextMapAddress = MAP_BASE;
 
     bool isUser() const { return space != nullptr; }
 
-    // Takes over the caller's reference. Returns the handle, or 0 if full.
-    u64 addHandle(Object* object);
+    // Takes over the capability's reference. Returns the handle, or 0 if the
+    // table is full.
+    u64 addHandle(Capability cap);
 
-    // The object behind a handle (no reference added), or nullptr if the
-    // handle isn't open.
-    Object* handle(u64 h) const;
+    // The capability behind a handle (no reference added; revoked ones
+    // included), or nullptr if the handle isn't open.
+    Capability* handle(u64 h);
 
-    // Removes the handle and returns its reference to the caller.
-    Object* takeHandle(u64 h);
+    // Removes the handle and returns its capability (and reference) to the
+    // caller; an empty one if the handle isn't open.
+    Capability takeHandle(u64 h);
 
     // Drops every handle and mapping, and the address space.
     void releaseResources();
@@ -89,7 +98,10 @@ Core::Task* spawnKernel(char const* name, void (*entry)(u64), u64 arg);
 // Takes ownership of `space` and of the references in `handles`, which
 // become the task's handles 1, 2, 3... (nullptr entries leave a gap).
 Core::Task* spawnUser(char const* name, Vmm::Space* space, u64 entry, u64 stackTop,
-                      Core::Object* const* handles = nullptr, usize handleCount = 0);
+                      Core::Capability const* handles = nullptr, usize handleCount = 0);
+
+// Every task that exists (linked by Task::allNext), dead ones not yet freed included.
+Core::Task* allTasks();
 
 Core::Task* current();
 

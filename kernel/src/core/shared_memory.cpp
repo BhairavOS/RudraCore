@@ -8,10 +8,6 @@ namespace Rudracore::Core {
 SharedMemory::~SharedMemory() {
     if (owned)
         Pmm::free(physical, size / Mem::PAGE_SIZE);
-    if (charged) {
-        charged->refund(size / Mem::PAGE_SIZE);
-        charged->unref();
-    }
 }
 
 SharedMemory* SharedMemory::allocate(u64 size) {

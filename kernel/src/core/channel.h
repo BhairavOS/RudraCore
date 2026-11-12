@@ -10,7 +10,7 @@ struct Task;
 struct Message {
     u8 data[Abi::MAX_MESSAGE_SIZE];
     u32 size;
-    Object* attached; // a handle in transit (holds a reference), or nullptr
+    Capability attached; // a handle in transit (holds a reference), or empty
 };
 
 // One end of a channel. Messages sent on an endpoint are queued on its peer.

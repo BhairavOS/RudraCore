@@ -4,17 +4,21 @@
 
 namespace Rudracore::Core {
 
-// How much memory one program may hold, in pages: the private memory it
-// allocates and the shared memory it creates (counted until that is freed,
-// even after it was handed to another program). So no single program can
-// take all of RAM from the others; the kernel's own reserve is in Pmm.
+// What one program may hold: pages of memory (the private memory it
+// allocates and the shared memory it creates) and kernel objects (channels,
+// shared memory). Shared memory and objects count until they are freed,
+// even after being handed to another program. So no single program can
+// take all of RAM or fill the kernel heap; the kernel's own reserve is in Pmm.
 //
 // Reference counted: held by its task and by every object charged to it,
 // so a refund after the task has ended still has somewhere to go.
 // Only touched with interrupts disabled (syscalls).
 struct Quota {
+    static constexpr u64 OBJECT_LIMIT = 1024;
+
     u64 limit;
     u64 used = 0;
+    u64 objects = 0;
     u32 refs = 1;
 
     explicit Quota(u64 limitPages) : limit(limitPages) {}
@@ -27,6 +31,15 @@ struct Quota {
     }
 
     void refund(u64 pages) { used -= pages; }
+
+    bool chargeObjects(u64 n) {
+        if (n > OBJECT_LIMIT - objects)
+            return false;
+        objects += n;
+        return true;
+    }
+
+    void refundObjects(u64 n) { objects -= n; }
 
     void ref() { refs++; }
 

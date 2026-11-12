@@ -40,7 +40,7 @@ bool Irq::notify() {
     Abi::IrqMessage payload{cookie};
     memcpy(message.data, &payload, sizeof(payload));
     message.size = sizeof(payload);
-    message.attached = nullptr;
+    message.attached = {};
     peer->push(message);
     return true;
 }

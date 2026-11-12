@@ -20,10 +20,10 @@ bool nameEquals(char const* a, char const* b, usize bLength) {
     return a[i] == '\0';
 }
 
-void dropHandles(Core::Object* const* handles, usize count) {
+void dropHandles(Core::Capability const* handles, usize count) {
     for (usize i = 0; i < count; i++) {
-        if (handles[i])
-            handles[i]->unref();
+        if (handles[i].object)
+            handles[i].object->unref();
     }
 }
 
@@ -63,7 +63,7 @@ bool exists(char const* name, usize nameLength) {
     return false;
 }
 
-Core::Task* startImage(char const* name, u8 const* data, usize size, Core::Object* const* handles,
+Core::Task* startImage(char const* name, u8 const* data, usize size, Core::Capability const* handles,
                        usize handleCount, Abi::Error& code, char const*& error) {
     Elf::Program program;
     if (not Elf::load(data, size, program, error)) {
@@ -79,7 +79,7 @@ Core::Task* startImage(char const* name, u8 const* data, usize size, Core::Objec
     return task;
 }
 
-Core::Task* start(char const* name, usize nameLength, Core::Object* const* handles,
+Core::Task* start(char const* name, usize nameLength, Core::Capability const* handles,
                   usize handleCount, Abi::Error& code, char const*& error) {
     Boot::Module const* module = nullptr;
     for (usize i = 0; bootInfo and i < bootInfo->moduleCount; i++) {

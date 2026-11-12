@@ -79,6 +79,19 @@ inline long random(void* out, unsigned long length) {
 
 inline long close(Handle handle) { return syscall(SYS_HANDLE_CLOSE, handle); }
 
+// A second handle to the same object, with `rights` (Rights) but never more
+// than this one has. E.g. duplicate(end, RIGHT_WRITE) is a send-only channel.
+inline long duplicate(Handle handle, unsigned long rights) { return syscall(SYS_HANDLE_DUPLICATE, handle, rights); }
+
+// Drops every right not in `rights`. Rights never come back.
+inline long restrictRights(Handle handle, unsigned long rights) { return syscall(SYS_HANDLE_RESTRICT, handle, rights); }
+
+// Cuts off every other handle to this object, in every program.
+inline long revoke(Handle handle) { return syscall(SYS_HANDLE_REVOKE, handle); }
+
+// The handle's rights, or an error.
+inline long rights(Handle handle) { return syscall(SYS_HANDLE_RIGHTS, handle); }
+
 inline long channelCreate(Handle& a, Handle& b) {
     Handle pair[2] = {};
     long result = syscall(SYS_CHANNEL_CREATE, arg(pair));

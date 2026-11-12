@@ -31,8 +31,8 @@ file loader.
 | SMEP / SMAP | **Enforced when the CPU has them (§7)** | SMAP allows user memory only inside two copy helpers. AC is cleared on every kernel entry. |
 | Kernel stack guard pages | **Enforced (§7)** | Each kernel stack sits in its own slot with an unmapped page below. The boot task's static stack is the one exception. |
 | User stack guard | **Enforced (§7)** | Programs must load below 4 GiB. The stack sits below 128 TiB with nothing mapped under it but shared memory far below. |
-| Handles | **Enforced, no rights** | Per-task tables of 64 slots, typed lookup, and **move-only** transfer (there is no duplicate call). No READ/WRITE/MAP rights, no generation counter. |
-| Who reaches hardware | **Enforced by delegation** | Only init gets IRQ, I/O-port and PCI handles. It moves them to the drivers (ps2, ahci, e1000/rtl8139). |
+| Handles | **Capabilities (§8)** | Each handle has rights (read, write, transfer, duplicate, revoke, MMIO, DMA) and a generation counter, and can be revoked. Rights only shrink. |
+| Who reaches hardware | **Enforced by delegation and rights (§8)** | Only init gets IRQ, I/O-port and PCI handles. It strips them to what each driver uses before moving them, so drivers can't pass devices on. |
 | DMA isolation | **None** | No IOMMU. `SYS_DEVICE_BAR` turns on bus mastering. A driver can make its device DMA to any physical address. |
 | Kernel memory accounting | **Added in §6 and §7** | A 4 MiB kernel reserve, plus a per-program quota of half of RAM. |
 | Boot integrity | **None** | ShoolLoader and Limine load every module with no signature or hash. |
@@ -96,11 +96,7 @@ firmware↔ShoolLoader↔kernel.
 
 ### Architectural weaknesses / insecure assumptions
 
-- **No handle rights.** A handle grants everything its object type allows.
-  Shared memory is always mapped RW unless the kernel set `readOnly`. There's
-  no way to pass read-only access to memory, or send-only access to a channel.
-- **No handle generations.** A closed slot is reused by the next `addHandle`,
-  so a stale handle in a buggy program silently refers to a new object.
+- ~~No handle rights~~ and ~~no handle generations~~: done in §8.
 - **Any task may `spawn` any boot program.** It's harmless today, because
   drivers need handles only init holds, but it widens the attack surface.
 - **A driver is trusted with all of RAM (DMA).** The comment in
@@ -140,7 +136,7 @@ replaced or read by any app.
 | 3 | X.509 + chain + hostname + expiry | kapala/tls, new x509.cpp | DER parser, RSA-PKCS1/PSS and ECDSA-P256 verify, trust store file in the boot image, fail closed | Bignum/P-256 code | L | Bad-cert test servers (expired, wrong host, self-signed) must fail |
 | 4 | ✅ Endpoint cycle prevention | channel, syscall | §7 | – | S | harden-test |
 | 5 | ✅ SMEP and SMAP | arch/protect, syscall copy paths | §7 | – | S / M | `FAULT_TEST=smep\|smap` |
-| 6 | Handle rights + generations | object, task, syscalls | `Handle = (gen << 8) \| slot`, rights mask per handle, `handle_restrict(h, rights)` | ABI change: all programs | M | Stale/forged handle tests |
+| 6 | ✅ Handle rights, generations, revocation | object, task, syscalls | §8 | – | M | harden-test |
 | 7 | ✅ Kernel stack guard pages | sched | §7 | – | M | `FAULT_TEST=stack` |
 | 8 | Verified boot | shoolloader | Hash every module and verify a signed manifest. Document the Limine/BIOS path as unverified | P2's signature code | M | Altered module refused |
 | 9 | Capture service + firewall hook | e1000/rtl8139, net | Shared-memory ring, policy in `net` | P1 | L | Fuzzed frames; policy tests |
@@ -206,4 +202,35 @@ and UEFI.
 by the loader's 256 MiB per program and the kernel reserve). The boot
 task's static stack has no guard page. SMEP and SMAP are off on CPUs
 without them, which includes QEMU's default model. Handle rights and
-generation counters (roadmap item 6) are not done.
+generation counters were added afterwards (§8).
+
+## 8. Capabilities
+
+Handles are now capabilities. Contract: `abi/rudracore/syscalls.h`.
+Kernel: `core/object.h` (`Capability`, object epoch, quota charge),
+`core/task.cpp` (handle table), `core/syscall.cpp` (checks and the new calls).
+
+| Item | Design | Checked by harden-test |
+|---|---|---|
+| Generation counters | Handle = `(generation << 8) \| slot`. The slot's generation is bumped when the slot is freed, so a stale number never matches. First handles are still 1, 2, 3…, so existing programs didn't change. | A reused slot gets a new number. The old number gives `BAD_HANDLE`. |
+| Rights | `READ`, `WRITE`, `TRANSFER`, `DUPLICATE`, `REVOKE`, `MMIO`, `DMA`, checked on every call (`ACCESS_DENIED`). New objects get all applicable rights. Boot files never get `WRITE` or `REVOKE` (one object shared by every program). Device registers aren't transferable. | Restricting never adds rights, and duplicating needs `DUPLICATE`. |
+| Read-only and send-only | `handle_duplicate(h, rights)` and `handle_restrict(h, rights)` (intersection only). Memory without `WRITE` maps read-only. A channel end with only `WRITE` sends but can't receive, and vice versa. | Send-only can't receive, receive-only can't send. The kernel won't write into a read-only mapping (`random` → `BAD_ADDRESS`). |
+| Revocation | Each object has an epoch and each handle records it. `handle_revoke` bumps the epoch, so every other handle (any program, in flight too) gets `REVOKED`. Memory is unmapped from every other program, and waiters on channels and IRQs are woken. | The revoker keeps access, others get `REVOKED`. A handle revoked in flight arrives as nothing. **A child program reading revoked memory faults at once.** |
+| Secure transfer | A moved handle keeps exactly its rights. Channel sends and `spawn_image` (untrusted apps) need `TRANSFER`. `spawn` of boot-image programs doesn't, which is how init gives drivers devices they can't pass on. Revoked handles can't move. Cycle rules from §7 still apply. | Moving without `TRANSFER` gets `ACCESS_DENIED`, and a revoked handle can't be moved. |
+| Object quotas | 1,024 channels and memory objects per program, charged to the creator, refunded when the object is destroyed (`Object::~Object`). | Parking channel ends in queues hits `OUT_OF_MEMORY`. Closing them gives the quota back. |
+| Device permissions | init restricts its hardware handles before spawning drivers: disk and network cards `READ\|MMIO\|DMA`, IRQs `READ`, PS/2 ports `READ\|WRITE`, screen `READ\|WRITE`. `dma_address` needs `DMA` on the device and `WRITE` on the memory. | Every driver works with only these rights (AHCI, e1000, RTL8139, PS/2), in QEMU under BIOS and UEFI. |
+
+**Lifetime fix found while adding revocation.** If a handle was revoked
+while its task was blocked in `wait` on several channels, the other
+channels could keep naming the task as their waiter. That pointer would
+dangle after the task exited. `wait` now clears the task's stale
+registrations on that path, and `handle_close` clears the closing task as
+waiter.
+
+**Limits.**
+- Revocation is all-or-nothing per object: it doesn't track which handle
+  was derived from which.
+- Revoking a channel end doesn't touch its peer.
+- A driver could still `spawn` a boot-image program with its device; boot
+  programs are trusted system code.
+- DMA itself is still unconfined without an IOMMU (threat T4 in §2).

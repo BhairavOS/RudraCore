@@ -31,6 +31,7 @@ Task* readyHead = nullptr;
 Task* readyTail = nullptr;
 Task* sleeping = nullptr;
 Task* zombies = nullptr;
+Task* everyTask = nullptr; // linked by allNext
 
 u64 nextId = 0;
 u64 liveTasks = 0;
@@ -107,6 +108,12 @@ void unmapKernelStack(u64 top) {
 }
 
 void destroy(Task* t) {
+    for (Task** link = &everyTask; *link; link = &(*link)->allNext) {
+        if (*link == t) {
+            *link = t->allNext;
+            break;
+        }
+    }
     t->releaseResources();
     if (t->stackPhysical) {
         unmapKernelStack(t->stackTop);
@@ -161,6 +168,8 @@ Arch::Frame* initialFrame(Task* t) {
 
 void start(Task* t) {
     Arch::InterruptGuard guard;
+    t->allNext = everyTask;
+    everyTask = t;
     liveTasks++;
     enqueue(t);
 }
@@ -213,13 +222,13 @@ Task* spawnKernel(char const* name, void (*entry)(u64), u64 arg) {
 }
 
 Task* spawnUser(char const* name, Vmm::Space* space, u64 entry, u64 stackTop,
-                Core::Object* const* handles, usize handleCount) {
+                Core::Capability const* handles, usize handleCount) {
     Task* t = newTask(name);
     if (not t) {
         Vmm::destroyUserSpace(space);
         for (usize i = 0; i < handleCount; i++) {
-            if (handles[i])
-                handles[i]->unref();
+            if (handles[i].object)
+                handles[i].object->unref();
         }
         return nullptr;
     }
@@ -228,7 +237,7 @@ Task* spawnUser(char const* name, Vmm::Space* space, u64 entry, u64 stackTop,
     // Half of RAM per program: shortcut, a fixed share; per-program limits set by init could come later.
     t->quota = new Core::Quota(Pmm::stats().managedPages / 2);
     for (usize i = 0; i < handleCount and i + 1 < Task::MAX_HANDLES; i++)
-        t->handles[i + 1] = handles[i];
+        t->handles[i + 1].cap = handles[i];
 
     Arch::Frame* frame = initialFrame(t);
     frame->rip = entry;
@@ -238,6 +247,10 @@ Task* spawnUser(char const* name, Vmm::Space* space, u64 entry, u64 stackTop,
 
     start(t);
     return t;
+}
+
+Task* allTasks() {
+    return everyTask;
 }
 
 Task* current() {

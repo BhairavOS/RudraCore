@@ -74,7 +74,8 @@ constexpr unsigned char EXIT_CODE[] = {0xB8, 0x01, 0x00, 0x00, 0x00, 0x31, 0xFF,
 
 // Writes a one-segment program (code at CODE) into `file`; `tweak` changes it.
 template <typename Tweak>
-long spawnCrafted(Sys::Handle memory, unsigned char* file, Tweak tweak) {
+long spawnCrafted(Sys::Handle memory, unsigned char* file, Tweak tweak, Sys::Handle const* give = nullptr,
+                  unsigned long giveCount = 0) {
     memset(file, 0, 4096);
     auto* h = reinterpret_cast<Header*>(file);
     auto* segments = reinterpret_cast<Segment*>(file + sizeof(Header));
@@ -100,7 +101,55 @@ long spawnCrafted(Sys::Handle memory, unsigned char* file, Tweak tweak) {
     char const name[] = "crafted";
     for (unsigned i = 0; i < sizeof(name); i++)
         request.name[i] = name[i];
+    for (unsigned long i = 0; i < giveCount; i++)
+        request.handles[i] = give[i];
+    request.handleCount = giveCount;
     return Sys::spawnImage(request);
+}
+
+// Revoking memory must take it away from a program that has it mapped. A
+// child maps our memory (its handle 1), says so on its handle 2, then reads
+// the memory forever. After the revoke its next read must fault, ending it,
+// which closes its channel.
+void checkRevokeUnmaps(Sys::Handle elfMemory, unsigned char* file) {
+    static constexpr unsigned char READER[] = {
+        0xBF, 0x01, 0x00, 0x00, 0x00, // mov edi, 1          (handle 1)
+        0xB8, 0x15, 0x00, 0x00, 0x00, // mov eax, 21         (memory_map)
+        0xCD, 0x80,                   // int 0x80
+        0x48, 0x89, 0xC3,             // mov rbx, rax
+        0xBF, 0x02, 0x00, 0x00, 0x00, // mov edi, 2          (handle 2)
+        0x48, 0x89, 0xDE,             // mov rsi, rbx        (1 byte of the mapping)
+        0xBA, 0x01, 0x00, 0x00, 0x00, // mov edx, 1
+        0x45, 0x31, 0xD2,             // xor r10d, r10d      (no handle)
+        0xB8, 0x0C, 0x00, 0x00, 0x00, // mov eax, 12         (channel_send)
+        0xCD, 0x80,                   // int 0x80
+        0x8A, 0x03,                   // spin: mov al, [rbx]
+        0xEB, 0xFC,                   //       jmp spin
+    };
+    auto shared = static_cast<Sys::Handle>(Sys::memoryCreate(4096));
+    long lent = Sys::duplicate(shared, Sys::RIGHT_READ | Sys::RIGHT_TRANSFER);
+    Sys::Handle mine, theirs;
+    Sys::channelCreate(mine, theirs);
+    Sys::Handle give[] = {static_cast<Sys::Handle>(lent), theirs};
+    long child = spawnCrafted(elfMemory, file, [](Header&, Segment* s) {
+        auto* code = reinterpret_cast<unsigned char*>(s) - sizeof(Header) + CODE;
+        for (unsigned i = 0; i < sizeof(READER); i++)
+            code[i] = READER[i];
+        s[0].filesz = s[0].memsz = CODE + sizeof(READER);
+    }, give, 2);
+    expect("starting the reader", child, 0);
+    if (child >= 0) {
+        char mapped;
+        Sys::recv(mine, &mapped, 1); // it has the memory mapped and is reading it
+        Sys::revoke(shared);
+        Sys::Handle ends[] = {mine};
+        long ready = Sys::wait(ends, 1, 2000);
+        char gone;
+        expect("revoking takes memory away from another program",
+               ready == 0 ? Sys::recv(mine, &gone, 1, nullptr, Sys::RECV_NONBLOCK) : ready, Sys::PEER_CLOSED);
+    }
+    Sys::close(mine);
+    Sys::close(shared);
 }
 
 void checkPrograms() {
@@ -137,8 +186,98 @@ void checkPrograms() {
                h.entry = BASE + 0x40; // inside the executable segment
            }), Sys::INVALID_ARGUMENT);
 
+    checkRevokeUnmaps(m, file);
+
     Sys::memoryUnmap(file);
     Sys::close(m);
+}
+
+// MARK: Capabilities
+
+void checkCapabilities() {
+    char byte = 1, got;
+
+    // Generation counters: a freed slot comes back under a new number.
+    Sys::Handle a, b, c, d;
+    Sys::channelCreate(a, b);
+    Sys::close(a);
+    Sys::channelCreate(c, d); // takes a's slot
+    expect("a reused slot gets a new handle number", c != a ? 0 : -1, 0);
+    expect("using a closed handle", Sys::send(a, &byte, 1), Sys::BAD_HANDLE);
+    Sys::close(b);
+
+    // Send-only and receive-only channel ends; rights never grow.
+    long sendOnly = Sys::duplicate(c, Sys::RIGHT_WRITE);
+    expect("a send-only duplicate", sendOnly, 0);
+    expect("a send-only end sends", Sys::send(sendOnly, &byte, 1), 0);
+    expect("a send-only end can't receive", Sys::recv(sendOnly, &got, 1, nullptr, Sys::RECV_NONBLOCK),
+           Sys::ACCESS_DENIED);
+    expect("a send-only end can't be duplicated", Sys::duplicate(sendOnly, Sys::RIGHTS_ALL), Sys::ACCESS_DENIED);
+    Sys::restrictRights(sendOnly, Sys::RIGHTS_ALL);
+    expect("restricting never adds rights", Sys::rights(sendOnly), Sys::RIGHT_WRITE);
+    Sys::restrictRights(d, Sys::RIGHT_READ);
+    expect("a receive-only end can't send", Sys::send(d, &byte, 1), Sys::ACCESS_DENIED);
+    expect("a receive-only end receives", Sys::recv(d, &got, 1, nullptr, Sys::RECV_NONBLOCK), 0);
+
+    // Moving a handle needs TRANSFER.
+    Sys::Handle x, y;
+    Sys::channelCreate(x, y);
+    long fixed = Sys::duplicate(c, Sys::RIGHT_WRITE);
+    expect("moving a handle without TRANSFER", Sys::send(x, &byte, 1, static_cast<Sys::Handle>(fixed)),
+           Sys::ACCESS_DENIED);
+
+    // Read-only memory: the kernel won't write into it on our behalf either.
+    auto mem = static_cast<Sys::Handle>(Sys::memoryCreate(4096));
+    long readOnly = Sys::duplicate(mem, Sys::RIGHT_READ | Sys::RIGHT_TRANSFER);
+    void* view = Sys::memoryMap(static_cast<Sys::Handle>(readOnly));
+    expect("mapping a read-only duplicate", view ? 0 : -1, 0);
+    expect("read-only memory isn't writable", Sys::random(view, 16), Sys::BAD_ADDRESS);
+    Sys::memoryUnmap(view);
+
+    // Revocation: every other handle stops working, even one in flight.
+    expect("revoking", Sys::revoke(mem), 0);
+    expect("a revoked handle stops working", Sys::rights(static_cast<Sys::Handle>(readOnly)), Sys::REVOKED);
+    expect("the revoker keeps its handle", Sys::rights(mem), 0);
+    expect("a revoked handle can't be moved", Sys::send(x, &byte, 1, static_cast<Sys::Handle>(readOnly)),
+           Sys::REVOKED);
+    long traveler = Sys::duplicate(c, Sys::RIGHT_WRITE | Sys::RIGHT_TRANSFER);
+    Sys::send(x, &byte, 1, static_cast<Sys::Handle>(traveler));
+    Sys::revoke(c);
+    Sys::Handle arrived = 1234;
+    Sys::recv(y, &got, 1, &arrived, Sys::RECV_NONBLOCK);
+    expect("a handle revoked on the way arrives as nothing", arrived == Sys::NO_HANDLE ? 0 : -1, 0);
+    expect("revoke without the right", Sys::revoke(d), Sys::ACCESS_DENIED);
+    long const opened[] = {static_cast<long>(c), static_cast<long>(d), sendOnly, fixed, static_cast<long>(x),
+                           static_cast<long>(y), static_cast<long>(mem), readOnly};
+    for (long h : opened)
+        Sys::close(static_cast<Sys::Handle>(h));
+
+    // Object quota: park channel ends in queues (so few handles stay open)
+    // until the kernel stops this program; closing them all gives it back.
+    constexpr int MAX_SINKS = 48;
+    Sys::Handle sinks[MAX_SINKS];
+    int sinkCount = 0;
+    long last = 0;
+    while (last >= 0 and sinkCount < MAX_SINKS) {
+        Sys::Handle in, sink;
+        if ((last = Sys::channelCreate(in, sink)) < 0)
+            break;
+        sinks[sinkCount++] = sink;
+        for (int i = 0; i < 32 and last >= 0; i++) {
+            Sys::Handle e, f;
+            if ((last = Sys::channelCreate(e, f)) >= 0) {
+                Sys::send(in, &byte, 1, e);
+                Sys::close(f);
+            }
+        }
+        Sys::close(in);
+    }
+    expect("the object quota stops a program", last, Sys::OUT_OF_MEMORY);
+    for (int i = 0; i < sinkCount; i++)
+        Sys::close(sinks[i]);
+    expect("closing objects gives the quota back", Sys::channelCreate(a, b), 0);
+    Sys::close(a);
+    Sys::close(b);
 }
 
 // MARK: Leaks and log text
@@ -162,6 +301,7 @@ int main() {
     checkCycles();
     checkPrograms();
     checkPadding();
+    checkCapabilities();
     Sys::log("harden check: this text\n[init] must not start a second log line");
 
     Text<> line;

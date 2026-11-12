@@ -8,9 +8,19 @@
 // a negative Error on failure. All other registers are preserved.
 //
 // Handles: programs reach kernel objects (channels, shared memory, devices)
-// only through handles, small per-program numbers like file descriptors.
-// A handle can be passed to another program in a channel message or when
-// spawning it; it then moves to that program. Handle 0 is never valid.
+// only through handles, per-program numbers like file descriptors. A handle
+// can be passed to another program in a channel message or when spawning
+// it; it then moves to that program. Handle 0 is never valid.
+//
+// A handle is (generation << 8) | slot. The generation changes each time a
+// slot is freed, so a closed handle's number never names a later object.
+// A program's first handles (from spawn) are still 1, 2, 3...
+//
+// Each handle carries rights (Rights below), checked on every call. Rights
+// can only shrink: handle_restrict drops some, handle_duplicate makes a
+// second handle with the same or fewer, and a moved handle keeps exactly
+// its rights. A handle with REVOKE can cut off every other handle to its
+// object (handle_revoke). Revoked handles fail with REVOKED.
 
 namespace Rudracore::Abi {
 
@@ -30,29 +40,43 @@ enum Syscall : unsigned long {
     SYS_SPAWN = 6,   // (char const* name, usize length, Handle const* handles, usize count) -> task id
                      //   Starts a program from the boot image. The handles move to the new
                      //   program, which finds them as handles 1, 2, 3... (NOT_FOUND, or a bad
-                     //   handle, leaves them with the caller.)
+                     //   handle, leaves them with the caller.) Boot-image programs are part of
+                     //   the system, so this moves handles without RIGHT_TRANSFER too: that's
+                     //   how init gives a driver a device it can't pass on.
     SYS_SYSTEM_INFO = 7, // (SystemInfo* out)
     SYS_RANDOM = 8,      // (void* out, usize length <= 256): fills it with random bytes, good for keys
     SYS_SPAWN_IMAGE = 15, // (SpawnImage const*) -> task id: starts a program from an ELF file in
-                          //   shared memory (an installed app). The handles move to it, as with spawn.
+                          //   shared memory (an installed app). The handles move to it, as with
+                          //   spawn, but each needs RIGHT_TRANSFER.
     SYS_FILE_OPEN = 9,   // (char const* name, usize length) -> Handle to read-only shared memory holding
                          //   a data file from the boot image (e.g. "fonts"); its size is up to the file
 
     // Handles and channels
-    SYS_HANDLE_CLOSE = 10,   // (Handle)
+    SYS_HANDLE_CLOSE = 10,   // (Handle): also works on a revoked handle
     SYS_CHANNEL_CREATE = 11, // (Handle out[2]): two connected endpoints
     SYS_CHANNEL_SEND = 12,   // (Handle endpoint, void const* data, usize length, Handle attach)
-                             //   Never blocks. `attach` (or NO_HANDLE) moves to the receiver.
+                             //   Never blocks. Needs RIGHT_WRITE. `attach` (or NO_HANDLE) moves to
+                             //   the receiver with its rights; it needs RIGHT_TRANSFER.
     SYS_CHANNEL_RECV = 13,   // (Handle endpoint, void* buffer, usize capacity, Handle* attached, u64 flags)
-                             //   -> message length. Waits for a message unless RECV_NONBLOCK.
+                             //   -> message length. Waits for a message unless RECV_NONBLOCK. Needs
+                             //   RIGHT_READ (so does wait). An attached handle revoked on the way
+                             //   arrives as NO_HANDLE.
     SYS_WAIT = 14,           // (Handle const* endpoints, usize count, u64 timeoutMs)
                              //   Waits until one of up to MAX_WAIT endpoints has a message (or its
                              //   peer closed), or until the timeout (WAIT_FOREVER: no limit; 0: just
                              //   check). Returns the index of a ready endpoint, or TIMED_OUT.
+    SYS_HANDLE_DUPLICATE = 16, // (Handle, u64 rights) -> a new handle to the same object with
+                               //   `rights` & the handle's own. Needs RIGHT_DUPLICATE.
+    SYS_HANDLE_RESTRICT = 17,  // (Handle, u64 rights): keep only `rights` & the current ones
+    SYS_HANDLE_REVOKE = 18,    // (Handle): every other handle to this object, in any program,
+                               //   stops working (REVOKED); shared memory is unmapped from every
+                               //   other program; blocked waiters wake up. Needs RIGHT_REVOKE.
+    SYS_HANDLE_RIGHTS = 19,    // (Handle) -> the handle's rights
 
     // Memory
     SYS_MEMORY_CREATE = 20, // (usize size) -> Handle to new zeroed shared memory
-    SYS_MEMORY_MAP = 21,    // (Handle memory) -> address where it's mapped (read + write)
+    SYS_MEMORY_MAP = 21,    // (Handle memory) -> address where it's mapped. Needs RIGHT_READ; writable
+                            //   only with RIGHT_WRITE.
     SYS_MEMORY_ALLOC = 22,  // (usize size) -> address of new zeroed private memory (read + write)
     SYS_MEMORY_UNMAP = 23,  // (address returned by SYS_MEMORY_MAP): remove that mapping
 
@@ -89,6 +113,19 @@ struct SpawnImage {
     char name[32];          // the task's name
     Handle handles[8];      // given to the program as its handles 1, 2, 3...
     unsigned long handleCount;
+};
+
+// What a handle allows. Objects are created with every right that applies.
+enum Rights : unsigned long {
+    RIGHT_READ = 1 << 0,      // channel: receive, wait; memory: map; IRQ: wait, bind, ack;
+                              // ports: in; device: info
+    RIGHT_WRITE = 1 << 1,     // channel: send; memory: map writable, DMA target; ports: out
+    RIGHT_TRANSFER = 1 << 2,  // move it to another program
+    RIGHT_DUPLICATE = 1 << 3, // make another handle to the same object
+    RIGHT_REVOKE = 1 << 4,    // cut off every other handle to the object
+    RIGHT_MMIO = 1 << 5,      // device: map its registers (device_bar)
+    RIGHT_DMA = 1 << 6,       // device: get physical addresses for it (dma_address)
+    RIGHTS_ALL = (1 << 7) - 1,
 };
 
 struct IrqMessage {
@@ -130,6 +167,10 @@ enum Error : long {
     CONNECTION_REFUSED = -19,
     CONNECTION_RESET = -20,
     NETWORK_DOWN = -21, // no address yet (DHCP hasn't answered) or no network card
+
+    // Capabilities
+    ACCESS_DENIED = -22, // the handle lacks a right the call needs
+    REVOKED = -23,       // the handle was revoked
 };
 
 // Handles init starts with (when the hardware exists).

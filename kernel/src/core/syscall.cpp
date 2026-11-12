@@ -88,22 +88,80 @@ struct Call {
         return Vmm::isUserRange(*task->space, address, length, writable);
     }
 
-    // The object behind a handle if it's open and of the right type;
+    // A live handle (open, not revoked) that has all of `rights`;
     // otherwise sets `error`.
-    template <typename T>
-    T* lookup(u64 handle, ObjectType type, i64& error) const {
-        Object* object = task->handle(handle);
-        if (not object) {
+    Core::Capability* capability(u64 handle, u32 rights, i64& error) const {
+        Core::Capability* cap = task->handle(handle);
+        if (not cap) {
             error = Abi::BAD_HANDLE;
             return nullptr;
         }
-        if (object->type != type) {
+        if (cap->revoked()) {
+            error = Abi::REVOKED;
+            return nullptr;
+        }
+        if ((cap->rights & rights) != rights) {
+            error = Abi::ACCESS_DENIED;
+            return nullptr;
+        }
+        return cap;
+    }
+
+    // The object behind a live handle of the right type with all of
+    // `rights`; otherwise sets `error`.
+    template <typename T>
+    T* lookup(u64 handle, ObjectType type, u32 rights, i64& error) const {
+        Core::Capability* cap = capability(handle, 0, error);
+        if (not cap)
+            return nullptr;
+        if (cap->object->type != type) {
             error = Abi::WRONG_TYPE;
             return nullptr;
         }
-        return static_cast<T*>(object);
+        if ((cap->rights & rights) != rights) {
+            error = Abi::ACCESS_DENIED;
+            return nullptr;
+        }
+        return static_cast<T*>(cap->object);
+    }
+
+    // Checks handles about to be moved to a new program: live, no
+    // duplicates, none equal to `except`, and with RIGHT_TRANSFER if asked.
+    i64 checkMovable(Abi::Handle const* handles, u64 count, bool needTransfer, Abi::Handle except) const {
+        for (u64 i = 0; i < count; i++) {
+            i64 error = 0;
+            if (handles[i] == except)
+                return Abi::BAD_HANDLE;
+            if (not capability(handles[i], needTransfer ? Abi::RIGHT_TRANSFER : 0, error))
+                return error;
+            for (u64 j = 0; j < i; j++) {
+                if (handles[j] == handles[i])
+                    return Abi::INVALID_ARGUMENT;
+            }
+        }
+        return Abi::OK;
     }
 };
+
+// A running task waits on nothing: clears it as the waiter of any channel
+// it holds (a registration left behind when a wait ended early).
+void forgetWaits(Task* task) {
+    for (auto& slot : task->handles) {
+        Object* object = slot.cap.object;
+        if (object and object->type == ObjectType::Channel and static_cast<Core::Endpoint*>(object)->waiter == task)
+            static_cast<Core::Endpoint*>(object)->waiter = nullptr;
+    }
+}
+
+// Rights a new object of each kind starts with, in the handle that made it.
+constexpr u32 CHANNEL_RIGHTS = Abi::RIGHT_READ | Abi::RIGHT_WRITE | Abi::RIGHT_TRANSFER | Abi::RIGHT_DUPLICATE |
+                               Abi::RIGHT_REVOKE;
+constexpr u32 MEMORY_RIGHTS = CHANNEL_RIGHTS;
+// Boot files are one object shared by every program that opens them: no
+// writing, and nobody may revoke everyone else's copy.
+constexpr u32 FILE_RIGHTS = Abi::RIGHT_READ | Abi::RIGHT_TRANSFER | Abi::RIGHT_DUPLICATE;
+// A device's registers stay with the driver that mapped them.
+constexpr u32 REGISTER_RIGHTS = Abi::RIGHT_READ | Abi::RIGHT_WRITE;
 
 // MARK: Tasks
 
@@ -152,18 +210,13 @@ Arch::Frame* sysSpawn(Call const& c) {
         return c.result(Abi::NOT_FOUND);
 
     // Check every handle before moving any, so a bad one changes nothing.
+    // Boot-image programs are part of the system: RIGHT_TRANSFER isn't needed.
     Abi::Handle handles[MAX_SPAWN_HANDLES];
     fromUser(handles, handlesAddress, handleCount * sizeof(Abi::Handle));
-    for (u64 i = 0; i < handleCount; i++) {
-        if (not c.task->handle(handles[i]))
-            return c.result(Abi::BAD_HANDLE);
-        for (u64 j = 0; j < i; j++) {
-            if (handles[j] == handles[i])
-                return c.result(Abi::INVALID_ARGUMENT);
-        }
-    }
+    if (i64 bad = c.checkMovable(handles, handleCount, false, Abi::NO_HANDLE))
+        return c.result(bad);
 
-    Object* objects[MAX_SPAWN_HANDLES];
+    Core::Capability objects[MAX_SPAWN_HANDLES];
     for (u64 i = 0; i < handleCount; i++)
         objects[i] = c.task->takeHandle(handles[i]);
 
@@ -194,22 +247,17 @@ Arch::Frame* sysSpawnImage(Call const& c) {
         return c.result(Abi::INVALID_ARGUMENT);
 
     i64 error = 0;
-    auto* memory = c.lookup<Core::SharedMemory>(request.memory, ObjectType::Memory, error);
+    auto* memory = c.lookup<Core::SharedMemory>(request.memory, ObjectType::Memory, Abi::RIGHT_READ, error);
     if (not memory)
         return c.result(error);
     if (not memory->owned or request.size == 0 or request.size > memory->size)
         return c.result(Abi::INVALID_ARGUMENT);
 
     // Check every handle before moving any, so a bad one changes nothing.
-    for (u64 i = 0; i < request.handleCount; i++) {
-        if (not c.task->handle(request.handles[i]) or request.handles[i] == request.memory)
-            return c.result(Abi::BAD_HANDLE);
-        for (u64 j = 0; j < i; j++) {
-            if (request.handles[j] == request.handles[i])
-                return c.result(Abi::INVALID_ARGUMENT);
-        }
-    }
-    Object* objects[MAX_SPAWN_HANDLES];
+    // An installed app is untrusted code: each handle needs RIGHT_TRANSFER.
+    if (i64 bad = c.checkMovable(request.handles, request.handleCount, true, request.memory))
+        return c.result(bad);
+    Core::Capability objects[MAX_SPAWN_HANDLES];
     for (u64 i = 0; i < request.handleCount; i++)
         objects[i] = c.task->takeHandle(request.handles[i]);
 
@@ -281,7 +329,7 @@ Arch::Frame* sysFileOpen(Call const& c) {
     if (not memory)
         return c.result(Abi::NOT_FOUND);
     memory->ref();
-    u64 handle = c.task->addHandle(memory);
+    u64 handle = c.task->addHandle({memory, FILE_RIGHTS, memory->epoch});
     if (not handle) {
         memory->unref();
         return c.result(Abi::NO_SPACE);
@@ -292,10 +340,87 @@ Arch::Frame* sysFileOpen(Call const& c) {
 // MARK: Handles and channels
 
 Arch::Frame* sysHandleClose(Call const& c) {
-    Object* object = c.task->takeHandle(c.arg0());
+    Object* object = c.task->takeHandle(c.arg0()).object;
     if (not object)
         return c.result(Abi::BAD_HANDLE);
+    // The endpoint may live on (other handles): it must not keep naming this task.
+    if (object->type == ObjectType::Channel and static_cast<Core::Endpoint*>(object)->waiter == c.task)
+        static_cast<Core::Endpoint*>(object)->waiter = nullptr;
     object->unref();
+    return c.result(Abi::OK);
+}
+
+Arch::Frame* sysHandleDuplicate(Call const& c) {
+    i64 error = 0;
+    Core::Capability* cap = c.capability(c.arg0(), Abi::RIGHT_DUPLICATE, error);
+    if (not cap)
+        return c.result(error);
+    Core::Capability copy{cap->object, cap->rights & static_cast<u32>(c.arg1()), cap->epoch};
+    copy.object->ref();
+    u64 handle = c.task->addHandle(copy);
+    if (not handle) {
+        copy.object->unref();
+        return c.result(Abi::NO_SPACE);
+    }
+    return c.result(static_cast<i64>(handle));
+}
+
+Arch::Frame* sysHandleRestrict(Call const& c) {
+    i64 error = 0;
+    Core::Capability* cap = c.capability(c.arg0(), 0, error);
+    if (not cap)
+        return c.result(error);
+    cap->rights &= static_cast<u32>(c.arg1());
+    return c.result(Abi::OK);
+}
+
+Arch::Frame* sysHandleRights(Call const& c) {
+    i64 error = 0;
+    Core::Capability* cap = c.capability(c.arg0(), 0, error);
+    if (not cap)
+        return c.result(error);
+    return c.result(cap->rights);
+}
+
+// Cuts off every other handle to the object: their epoch no longer matches.
+// Then removes what they already got out of it: other programs' mappings of
+// revoked memory, and tasks blocked on it are woken (to see REVOKED).
+Arch::Frame* sysHandleRevoke(Call const& c) {
+    i64 error = 0;
+    Core::Capability* cap = c.capability(c.arg0(), Abi::RIGHT_REVOKE, error);
+    if (not cap)
+        return c.result(error);
+    Object* object = cap->object;
+    object->epoch++;
+    cap->epoch = object->epoch;
+
+    switch (object->type) {
+    case ObjectType::Channel:
+        static_cast<Core::Endpoint*>(object)->wakeWaiter();
+        break;
+    case ObjectType::Irq:
+        if (Task* waiter = static_cast<Core::Irq*>(object)->waiter) {
+            static_cast<Core::Irq*>(object)->waiter = nullptr;
+            Sched::wake(waiter);
+        }
+        break;
+    case ObjectType::Memory:
+        for (Task* t = Sched::allTasks(); t; t = t->allNext) {
+            if (t == c.task or not t->space)
+                continue;
+            for (auto& mapping : t->mappings) {
+                if (mapping.object == object) {
+                    t->space->unmap(mapping.address, mapping.size);
+                    object->unref();
+                    mapping = {};
+                }
+            }
+        }
+        break;
+    case ObjectType::IoPorts:
+    case ObjectType::PciDevice:
+        break;
+    }
     return c.result(Abi::OK);
 }
 
@@ -306,11 +431,15 @@ Arch::Frame* sysChannelCreate(Call const& c) {
     // Two endpoints, each a little over one page of kernel heap.
     if (not Pmm::userCanUse(2 * (sizeof(Core::Endpoint) / Mem::PAGE_SIZE + 1)))
         return c.result(Abi::OUT_OF_MEMORY);
+    if (not c.task->quota->chargeObjects(2))
+        return c.result(Abi::OUT_OF_MEMORY);
 
     Core::Endpoint *a, *b;
     Core::Endpoint::createPair(a, b);
-    u64 ha = c.task->addHandle(a);
-    u64 hb = ha ? c.task->addHandle(b) : 0;
+    a->chargeTo(c.task->quota, 0);
+    b->chargeTo(c.task->quota, 0);
+    u64 ha = c.task->addHandle({a, CHANNEL_RIGHTS, 0});
+    u64 hb = ha ? c.task->addHandle({b, CHANNEL_RIGHTS, 0}) : 0;
     if (not hb) {
         if (ha)
             c.task->takeHandle(ha);
@@ -326,7 +455,7 @@ Arch::Frame* sysChannelCreate(Call const& c) {
 
 Arch::Frame* sysChannelSend(Call const& c) {
     i64 error = 0;
-    auto* endpoint = c.lookup<Core::Endpoint>(c.arg0(), ObjectType::Channel, error);
+    auto* endpoint = c.lookup<Core::Endpoint>(c.arg0(), ObjectType::Channel, Abi::RIGHT_WRITE, error);
     if (not endpoint)
         return c.result(error);
 
@@ -338,8 +467,12 @@ Arch::Frame* sysChannelSend(Call const& c) {
         return c.result(Abi::INVALID_ARGUMENT);
     if (not c.userMemory(address, length))
         return c.result(Abi::BAD_ADDRESS);
-    if (attach != Abi::NO_HANDLE and (attach == c.arg0() or not c.task->handle(attach)))
+    if (attach == c.arg0())
         return c.result(Abi::BAD_HANDLE);
+    // The attached handle travels with its rights, so it must be live and
+    // allowed to move.
+    if (attach != Abi::NO_HANDLE and not c.capability(attach, Abi::RIGHT_TRANSFER, error))
+        return c.result(error);
 
     Core::Endpoint* peer = endpoint->peer;
     if (not peer)
@@ -352,7 +485,7 @@ Arch::Frame* sysChannelSend(Call const& c) {
     // Refuse every way to start one: sending the receiving endpoint into its
     // own queue, an endpoint that already holds channels or IRQs in its
     // queue, or an IRQ bound to a channel.
-    if (Object* object = attach != Abi::NO_HANDLE ? c.task->handle(attach) : nullptr) {
+    if (Object* object = attach != Abi::NO_HANDLE ? c.task->handle(attach)->object : nullptr) {
         if (object == peer)
             return c.result(Abi::INVALID_ARGUMENT);
         if (object->type == ObjectType::Channel and static_cast<Core::Endpoint*>(object)->holdsLinks())
@@ -364,14 +497,14 @@ Arch::Frame* sysChannelSend(Call const& c) {
     Core::Message message;
     fromUser(message.data, address, length);
     message.size = static_cast<u32>(length);
-    message.attached = attach != Abi::NO_HANDLE ? c.task->takeHandle(attach) : nullptr;
+    message.attached = attach != Abi::NO_HANDLE ? c.task->takeHandle(attach) : Core::Capability{};
     peer->push(message);
     return c.result(Abi::OK);
 }
 
 Arch::Frame* sysChannelRecv(Call const& c) {
     i64 error = 0;
-    auto* endpoint = c.lookup<Core::Endpoint>(c.arg0(), ObjectType::Channel, error);
+    auto* endpoint = c.lookup<Core::Endpoint>(c.arg0(), ObjectType::Channel, Abi::RIGHT_READ, error);
     if (not endpoint)
         return c.result(error);
 
@@ -401,13 +534,16 @@ Arch::Frame* sysChannelRecv(Call const& c) {
 
     // Install an attached handle first: if the table is full, the message
     // stays queued and nothing is lost.
+    // A handle revoked on the way is dropped, like one the receiver didn't
+    // ask for.
     u64 received = Abi::NO_HANDLE;
-    if (message.attached and handleOut) {
-        received = c.task->addHandle(message.attached);
+    Core::Capability& attached = message.attached;
+    if (attached.object and handleOut and not attached.revoked()) {
+        received = c.task->addHandle(attached);
         if (not received)
             return c.result(Abi::NO_SPACE);
-    } else if (message.attached) {
-        message.attached->unref(); // the receiver didn't ask for handles
+    } else if (attached.object) {
+        attached.object->unref();
     }
 
     toUser(buffer, message.data, message.size);
@@ -450,9 +586,13 @@ Arch::Frame* sysWait(Call const& c) {
     Core::Endpoint* endpoints[Abi::MAX_WAIT];
     for (u64 i = 0; i < count; i++) {
         i64 error = 0;
-        endpoints[i] = c.lookup<Core::Endpoint>(handles[i], ObjectType::Channel, error);
-        if (not endpoints[i])
+        endpoints[i] = c.lookup<Core::Endpoint>(handles[i], ObjectType::Channel, Abi::RIGHT_READ, error);
+        if (not endpoints[i]) {
+            // A handle revoked while this task waited: endpoints after it
+            // may still name the task as their waiter.
+            forgetWaits(task);
             return finish(error, endpoints, i);
+        }
         if (endpoints[i]->waiter and endpoints[i]->waiter != task)
             return finish(Abi::INVALID_ARGUMENT, endpoints, i); // one waiter per endpoint
     }
@@ -495,17 +635,22 @@ Arch::Frame* sysMemoryCreate(Call const& c) {
     if (c.arg0() == 0 or c.arg0() > Core::SharedMemory::MAX_SIZE)
         return c.result(Abi::INVALID_ARGUMENT);
     u64 pages = Mem::alignUp(c.arg0(), Mem::PAGE_SIZE) / Mem::PAGE_SIZE;
-    if (not c.task->quota->charge(pages))
+    Core::Quota& quota = *c.task->quota;
+    if (not quota.chargeObjects(1))
         return c.result(Abi::OUT_OF_MEMORY);
-    auto* memory = Core::SharedMemory::allocate(c.arg0());
-    if (not memory) {
-        c.task->quota->refund(pages);
+    if (not quota.charge(pages)) {
+        quota.refundObjects(1);
         return c.result(Abi::OUT_OF_MEMORY);
     }
-    memory->charged = c.task->quota;
-    c.task->quota->ref();
+    auto* memory = Core::SharedMemory::allocate(c.arg0());
+    if (not memory) {
+        quota.refund(pages);
+        quota.refundObjects(1);
+        return c.result(Abi::OUT_OF_MEMORY);
+    }
+    memory->chargeTo(&quota, pages);
 
-    u64 handle = c.task->addHandle(memory);
+    u64 handle = c.task->addHandle({memory, MEMORY_RIGHTS, 0});
     if (not handle) {
         memory->unref();
         return c.result(Abi::NO_SPACE);
@@ -515,9 +660,10 @@ Arch::Frame* sysMemoryCreate(Call const& c) {
 
 Arch::Frame* sysMemoryMap(Call const& c) {
     i64 error = 0;
-    auto* memory = c.lookup<Core::SharedMemory>(c.arg0(), ObjectType::Memory, error);
+    auto* memory = c.lookup<Core::SharedMemory>(c.arg0(), ObjectType::Memory, Abi::RIGHT_READ, error);
     if (not memory)
         return c.result(error);
+    bool writable = not memory->readOnly and (c.task->handle(c.arg0())->rights & Abi::RIGHT_WRITE);
 
     Core::Mapping* slot = nullptr;
     for (auto& mapping : c.task->mappings) {
@@ -531,7 +677,7 @@ Arch::Frame* sysMemoryMap(Call const& c) {
     if (not slot or address + memory->size > MAP_LIMIT)
         return c.result(Abi::NO_SPACE);
 
-    u32 access = Vmm::USER | (memory->readOnly ? 0 : Vmm::WRITE); // not OWNED: the object owns the pages
+    u32 access = Vmm::USER | (writable ? Vmm::WRITE : 0); // not OWNED: the object owns the pages
     if (not c.task->space->map(address, memory->physical, memory->size, access, memory->cache)) {
         c.task->space->unmap(address, memory->size);
         return c.result(Abi::OUT_OF_MEMORY);
@@ -590,7 +736,7 @@ Arch::Frame* sysMemoryAlloc(Call const& c) {
 
 Arch::Frame* sysIrqWait(Call const& c) {
     i64 error = 0;
-    auto* irq = c.lookup<Core::Irq>(c.arg0(), ObjectType::Irq, error);
+    auto* irq = c.lookup<Core::Irq>(c.arg0(), ObjectType::Irq, Abi::RIGHT_READ, error);
     if (not irq)
         return c.result(error);
 
@@ -607,10 +753,10 @@ Arch::Frame* sysIrqWait(Call const& c) {
 
 Arch::Frame* sysIrqBind(Call const& c) {
     i64 error = 0;
-    auto* irq = c.lookup<Core::Irq>(c.arg0(), ObjectType::Irq, error);
+    auto* irq = c.lookup<Core::Irq>(c.arg0(), ObjectType::Irq, Abi::RIGHT_READ, error);
     if (not irq)
         return c.result(error);
-    auto* endpoint = c.lookup<Core::Endpoint>(c.arg1(), ObjectType::Channel, error);
+    auto* endpoint = c.lookup<Core::Endpoint>(c.arg1(), ObjectType::Channel, Abi::RIGHT_WRITE, error);
     if (not endpoint)
         return c.result(error);
 
@@ -620,7 +766,7 @@ Arch::Frame* sysIrqBind(Call const& c) {
 
 Arch::Frame* sysIrqAck(Call const& c) {
     i64 error = 0;
-    auto* irq = c.lookup<Core::Irq>(c.arg0(), ObjectType::Irq, error);
+    auto* irq = c.lookup<Core::Irq>(c.arg0(), ObjectType::Irq, Abi::RIGHT_READ, error);
     if (not irq)
         return c.result(error);
     irq->acknowledge();
@@ -629,7 +775,7 @@ Arch::Frame* sysIrqAck(Call const& c) {
 
 Arch::Frame* sysPortIn(Call const& c) {
     i64 error = 0;
-    auto* ports = c.lookup<Core::IoPorts>(c.arg0(), ObjectType::IoPorts, error);
+    auto* ports = c.lookup<Core::IoPorts>(c.arg0(), ObjectType::IoPorts, Abi::RIGHT_READ, error);
     if (not ports)
         return c.result(error);
 
@@ -641,7 +787,7 @@ Arch::Frame* sysPortIn(Call const& c) {
 
 Arch::Frame* sysPortOut(Call const& c) {
     i64 error = 0;
-    auto* ports = c.lookup<Core::IoPorts>(c.arg0(), ObjectType::IoPorts, error);
+    auto* ports = c.lookup<Core::IoPorts>(c.arg0(), ObjectType::IoPorts, Abi::RIGHT_WRITE, error);
     if (not ports)
         return c.result(error);
 
@@ -654,7 +800,7 @@ Arch::Frame* sysPortOut(Call const& c) {
 
 Arch::Frame* sysDeviceInfo(Call const& c) {
     i64 error = 0;
-    auto* device = c.lookup<Core::PciDevice>(c.arg0(), ObjectType::PciDevice, error);
+    auto* device = c.lookup<Core::PciDevice>(c.arg0(), ObjectType::PciDevice, Abi::RIGHT_READ, error);
     if (not device)
         return c.result(error);
     if (not c.userMemory(c.arg1(), sizeof(Abi::DeviceInfo), true))
@@ -675,7 +821,7 @@ Arch::Frame* sysDeviceInfo(Call const& c) {
 
 Arch::Frame* sysDeviceBar(Call const& c) {
     i64 error = 0;
-    auto* device = c.lookup<Core::PciDevice>(c.arg0(), ObjectType::PciDevice, error);
+    auto* device = c.lookup<Core::PciDevice>(c.arg0(), ObjectType::PciDevice, Abi::RIGHT_MMIO, error);
     if (not device)
         return c.result(error);
     u64 index = c.arg1();
@@ -685,7 +831,7 @@ Arch::Frame* sysDeviceBar(Call const& c) {
 
     auto const& bar = device->bars[index];
     auto* memory = Core::SharedMemory::device(bar.address, bar.size, Vmm::Cache::Uncached);
-    u64 handle = c.task->addHandle(memory);
+    u64 handle = c.task->addHandle({memory, REGISTER_RIGHTS, 0});
     if (not handle) {
         memory->unref();
         return c.result(Abi::NO_SPACE);
@@ -696,9 +842,10 @@ Arch::Frame* sysDeviceBar(Call const& c) {
 
 Arch::Frame* sysDmaAddress(Call const& c) {
     i64 error = 0;
-    if (not c.lookup<Core::PciDevice>(c.arg0(), ObjectType::PciDevice, error))
+    if (not c.lookup<Core::PciDevice>(c.arg0(), ObjectType::PciDevice, Abi::RIGHT_DMA, error))
         return c.result(error);
-    auto* memory = c.lookup<Core::SharedMemory>(c.arg1(), ObjectType::Memory, error);
+    // The device will write it: the driver must be allowed to write it too.
+    auto* memory = c.lookup<Core::SharedMemory>(c.arg1(), ObjectType::Memory, Abi::RIGHT_WRITE, error);
     if (not memory)
         return c.result(error);
     if (not memory->owned)
@@ -741,6 +888,10 @@ Arch::Frame* dispatch(Arch::Frame* frame) {
     case Abi::SYS_CHANNEL_SEND: return sysChannelSend(c);
     case Abi::SYS_CHANNEL_RECV: return sysChannelRecv(c);
     case Abi::SYS_WAIT: return sysWait(c);
+    case Abi::SYS_HANDLE_DUPLICATE: return sysHandleDuplicate(c);
+    case Abi::SYS_HANDLE_RESTRICT: return sysHandleRestrict(c);
+    case Abi::SYS_HANDLE_REVOKE: return sysHandleRevoke(c);
+    case Abi::SYS_HANDLE_RIGHTS: return sysHandleRights(c);
 
     case Abi::SYS_MEMORY_CREATE: return sysMemoryCreate(c);
     case Abi::SYS_MEMORY_MAP: return sysMemoryMap(c);

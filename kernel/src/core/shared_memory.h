@@ -18,7 +18,6 @@ struct SharedMemory : public Object {
     bool isScreen = false; // the boot framebuffer: mapping it hands the screen to userspace
     bool readOnly = false; // mapped without write access (boot image files)
     Vmm::Cache cache = Vmm::Cache::WriteBack;
-    Quota* charged = nullptr; // the program whose quota pays for it (holds a reference)
 
     SharedMemory() : Object(ObjectType::Memory) {}
     ~SharedMemory() override;

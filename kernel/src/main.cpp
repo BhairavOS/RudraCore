@@ -175,6 +175,8 @@ void faultTest() {
 // which driver gets what. The kernel itself never starts other programs.
 void startInit(Boot::Info const& info) {
     Core::Object* handles[7] = {};
+    // init gets every right; it hands each driver only the ones it needs.
+    Core::Capability caps[7];
 
     if (info.hasFramebuffer) {
         auto const& fb = info.framebuffer;
@@ -222,7 +224,9 @@ void startInit(Boot::Info const& info) {
 
     Abi::Error code;
     char const* error = nullptr;
-    Core::Task* init = Programs::start("init", 4, handles, 7, code, error);
+    for (usize i = 0; i < 7; i++)
+        caps[i] = {handles[i], Abi::RIGHTS_ALL, 0};
+    Core::Task* init = Programs::start("init", 4, caps, 7, code, error);
     if (not init)
         panic("can't start init: is init.elf in the boot image?");
     log("[core] started init as task ", init->id, " with the framebuffer, PS/2 ports, keyboard and mouse irqs",

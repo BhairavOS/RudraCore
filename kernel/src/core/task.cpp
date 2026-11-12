@@ -3,32 +3,38 @@
 
 namespace Rudracore::Core {
 
-u64 Task::addHandle(Object* object) {
-    for (u64 h = 1; h < MAX_HANDLES; h++) {
-        if (not handles[h]) {
-            handles[h] = object;
-            return h;
+static_assert(Task::MAX_HANDLES <= 256, "a handle's slot is its low 8 bits");
+
+u64 Task::addHandle(Capability cap) {
+    for (u64 slot = 1; slot < MAX_HANDLES; slot++) {
+        if (not handles[slot].cap.object) {
+            handles[slot].cap = cap;
+            return (handles[slot].generation << 8) | slot;
         }
     }
     return 0;
 }
 
-Object* Task::handle(u64 h) const {
-    if (h == 0 or h >= MAX_HANDLES)
+Capability* Task::handle(u64 h) {
+    u64 slot = h & 0xFF;
+    if (slot == 0 or slot >= MAX_HANDLES or not handles[slot].cap.object or handles[slot].generation != h >> 8)
         return nullptr;
-    return handles[h];
+    return &handles[slot].cap;
 }
 
-Object* Task::takeHandle(u64 h) {
-    Object* object = handle(h);
-    if (object)
-        handles[h] = nullptr;
-    return object;
+Capability Task::takeHandle(u64 h) {
+    Capability* cap = handle(h);
+    if (not cap)
+        return {};
+    Capability taken = *cap;
+    *cap = {};
+    handles[h & 0xFF].generation++;
+    return taken;
 }
 
 void Task::releaseResources() {
-    for (auto& object : handles) {
-        if (object) {
+    for (auto& slot : handles) {
+        if (Object* object = slot.cap.object) {
             // An endpoint may outlive this handle (another reference holds
             // it): it must not keep pointing at this task as its waiter.
             if (object->type == ObjectType::Channel) {
@@ -37,7 +43,7 @@ void Task::releaseResources() {
                     endpoint->waiter = nullptr;
             }
             object->unref();
-            object = nullptr;
+            slot.cap = {};
         }
     }
 

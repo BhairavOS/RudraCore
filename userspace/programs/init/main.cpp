@@ -169,10 +169,25 @@ void spawnConnected(char const* program, Channel& connect, ConnectMessage messag
 
 } // namespace
 
+// The kernel gives init every right to the hardware. Each driver gets only
+// what it uses: no passing a device on (TRANSFER), no copies (DUPLICATE),
+// no revoking. Missing hardware just makes a call fail.
+void limitDevices() {
+    constexpr unsigned long PCI = Sys::RIGHT_READ | Sys::RIGHT_MMIO | Sys::RIGHT_DMA;
+    Sys::restrictRights(Sys::INIT_HANDLE_STORAGE, PCI);
+    Sys::restrictRights(Sys::INIT_HANDLE_NETWORK, PCI);
+    Sys::restrictRights(Sys::INIT_HANDLE_NETWORK_IRQ, Sys::RIGHT_READ);
+    Sys::restrictRights(Sys::INIT_HANDLE_PS2_PORTS, Sys::RIGHT_READ | Sys::RIGHT_WRITE);
+    Sys::restrictRights(Sys::INIT_HANDLE_KEYBOARD_IRQ, Sys::RIGHT_READ);
+    Sys::restrictRights(Sys::INIT_HANDLE_MOUSE_IRQ, Sys::RIGHT_READ);
+    Sys::restrictRights(Sys::INIT_HANDLE_FRAMEBUFFER, Sys::RIGHT_READ | Sys::RIGHT_WRITE);
+}
+
 int main() {
     Text<> hello;
     hello.add("Bhairav OS userspace is up. I am init, task ").add(Sys::taskId());
     Sys::log(hello.cstr());
+    limitDevices();
 
 #if BHAIRAV_SECURITY_TEST
     // First, alone: it takes all free memory for a moment, so nothing else
