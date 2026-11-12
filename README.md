@@ -55,6 +55,7 @@ Testing options (inside `.\bhairav.ps1 shell`, or on Linux):
 
 ```sh
 make shot PANIC_TEST=1                 # fault on purpose to check the panic screen
+make shot SECURITY_TEST=1 WAIT=16      # also run oom-test: a program using up all memory must not crash the kernel
 make shot FIRMWARE=uefi WAIT=9         # boot through UEFI instead of BIOS
 STEP=0.1 MONITOR="..." make shot       # faster mouse commands (e.g. double clicks)
 NIC=rtl8139 make shot                  # a Realtek network card instead of the Intel one
@@ -374,7 +375,8 @@ mouse driver), `ahci` (disk driver), `fs` (file system), `e1000` and
 `rtl8139` (network card drivers), `net` (TCP/IP), `kamalshell` (the
 desktop), the apps `browser`, `files`, `terminal`, `notes`, `monitor`,
 `store` and `about`, and `ipc-test`, `protect-test`, `fpu-test`, `fs-test`, `net-test`
-and `tls-test` (checks run at every boot). The boot image also holds
+and `tls-test` (checks run at every boot; `oom-test` runs only in
+`SECURITY_TEST=1` builds). The boot image also holds
 `fonts.bin` and `catalog.bin` (the App Store's packages).
 
 ## Roadmap
