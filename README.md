@@ -55,7 +55,10 @@ Testing options (inside `.\bhairav.ps1 shell`, or on Linux):
 
 ```sh
 make shot PANIC_TEST=1                 # fault on purpose to check the panic screen
-make shot SECURITY_TEST=1 WAIT=16      # also run oom-test: a program using up all memory must not crash the kernel
+make shot SECURITY_TEST=1 WAIT=20      # also run oom-test: per-program quota and the kernel's memory reserve
+CPU=max make shot                      # a QEMU CPU with SMEP and SMAP (the default model has neither)
+CPU=max make shot FAULT_TEST=stack     # the kernel breaks a protection on purpose (stack, smep or smap):
+                                       #   the boot must end in a panic naming that fault
 make shot FIRMWARE=uefi WAIT=9         # boot through UEFI instead of BIOS
 STEP=0.1 MONITOR="..." make shot       # faster mouse commands (e.g. double clicks)
 NIC=rtl8139 make shot                  # a Realtek network card instead of the Intel one
@@ -375,8 +378,8 @@ mouse driver), `ahci` (disk driver), `fs` (file system), `e1000` and
 `rtl8139` (network card drivers), `net` (TCP/IP), `kamalshell` (the
 desktop), the apps `browser`, `files`, `terminal`, `notes`, `monitor`,
 `store` and `about`, and `ipc-test`, `protect-test`, `fpu-test`, `fs-test`, `net-test`
-and `tls-test` (checks run at every boot; `oom-test` runs only in
-`SECURITY_TEST=1` builds). The boot image also holds
+`harden-test` and `tls-test` (checks run at every boot; `oom-test` runs
+only in `SECURITY_TEST=1` builds). The boot image also holds
 `fonts.bin` and `catalog.bin` (the App Store's packages).
 
 ## Roadmap

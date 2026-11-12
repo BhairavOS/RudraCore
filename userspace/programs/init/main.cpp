@@ -190,6 +190,7 @@ int main() {
 #endif
 
     Sys::spawn("protect-test");
+    Sys::spawn("harden-test");
     Sys::spawn("fpu-test"); // two at once: their floating-point
     Sys::spawn("fpu-test"); // registers must not mix
     checkIpc();

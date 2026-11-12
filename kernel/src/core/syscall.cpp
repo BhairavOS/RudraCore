@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/io.h"
 #include "arch/x86_64/pic.h"
+#include "arch/x86_64/protect.h"
 #include "core/channel.h"
 #include "core/device.h"
 #include "core/programs.h"
@@ -16,6 +17,7 @@
 #include "rudracore/syscalls.h"
 
 extern "C" void* memcpy(void* dest, void const* src, usize n);
+extern "C" void* memset(void* dest, int value, usize n);
 
 namespace Rudracore::Syscall {
 
@@ -31,6 +33,31 @@ constexpr u64 INT80_LENGTH = 2; // `int $0x80` is 2 bytes: CD 80
 
 // Highest address shared memory may be mapped at (below the user stack).
 constexpr u64 MAP_LIMIT = 0x00007f0000000000;
+
+// Longest wait a program may ask for (about 34 years): keeps now + timeout
+// from wrapping around.
+constexpr u64 MAX_TIMEOUT_MS = 1ull << 40;
+
+// The only ways the kernel touches user memory. The range must already be
+// checked (Call::userMemory). With SMAP, user pages are reachable only here.
+void fromUser(void* to, u64 from, u64 length) {
+    Arch::Protect::UserAccess open;
+    memcpy(to, reinterpret_cast<void const*>(from), length);
+}
+
+void toUser(u64 to, void const* from, u64 length) {
+    Arch::Protect::UserAccess open;
+    memcpy(reinterpret_cast<void*>(to), from, length);
+}
+
+// Text from a program that goes into the kernel log: control characters
+// (newlines, terminal escapes) would let it forge log lines.
+void makePrintable(char* text, u64 length) {
+    for (u64 i = 0; i < length; i++) {
+        if (static_cast<u8>(text[i]) < 0x20 or text[i] == 0x7F)
+            text[i] = '?';
+    }
+}
 
 // Everything a system call needs: the caller and its saved registers.
 struct Call {
@@ -92,10 +119,12 @@ Arch::Frame* sysLog(Call const& c) {
     if (not c.userMemory(address, length))
         return c.result(Abi::BAD_ADDRESS);
 
+    char text[MAX_LOG_LENGTH];
+    fromUser(text, address, length);
     // Drop a trailing newline; log() adds its own.
-    auto const* text = reinterpret_cast<char const*>(address);
     if (length > 0 and text[length - 1] == '\n')
         length--;
+    makePrintable(text, length);
 
     log("[", c.task->name, "] ", Str{text, length});
     return c.result(Abi::OK);
@@ -114,7 +143,7 @@ Arch::Frame* sysSpawn(Call const& c) {
         not c.userMemory(handlesAddress, handleCount * sizeof(Abi::Handle)))
         return c.result(Abi::BAD_ADDRESS);
 
-    memcpy(name, reinterpret_cast<void const*>(nameAddress), nameLength);
+    fromUser(name, nameAddress, nameLength);
     name[nameLength] = '\0';
 
     // No such program: fail before taking any handle, so the caller still
@@ -124,7 +153,7 @@ Arch::Frame* sysSpawn(Call const& c) {
 
     // Check every handle before moving any, so a bad one changes nothing.
     Abi::Handle handles[MAX_SPAWN_HANDLES];
-    memcpy(handles, reinterpret_cast<void const*>(handlesAddress), handleCount * sizeof(Abi::Handle));
+    fromUser(handles, handlesAddress, handleCount * sizeof(Abi::Handle));
     for (u64 i = 0; i < handleCount; i++) {
         if (not c.task->handle(handles[i]))
             return c.result(Abi::BAD_HANDLE);
@@ -155,8 +184,12 @@ Arch::Frame* sysSpawnImage(Call const& c) {
     Abi::SpawnImage request;
     if (not c.userMemory(c.arg0(), sizeof(request)))
         return c.result(Abi::BAD_ADDRESS);
-    memcpy(&request, reinterpret_cast<void const*>(c.arg0()), sizeof(request));
+    fromUser(&request, c.arg0(), sizeof(request));
     request.name[sizeof(request.name) - 1] = '\0';
+    u64 nameLength = 0;
+    while (request.name[nameLength])
+        nameLength++;
+    makePrintable(request.name, nameLength);
     if (request.handleCount > MAX_SPAWN_HANDLES or request.name[0] == '\0')
         return c.result(Abi::INVALID_ARGUMENT);
 
@@ -199,7 +232,8 @@ Arch::Frame* sysSystemInfo(Call const& c, Boot::Info const& boot) {
         return c.result(Abi::BAD_ADDRESS);
 
     auto stats = Pmm::stats();
-    Abi::SystemInfo info{};
+    Abi::SystemInfo info;
+    memset(&info, 0, sizeof(info)); // padding too: no stale kernel stack bytes reach the program
     info.uptimeMs = Time::now();
     info.totalMemory = stats.managedPages * Mem::PAGE_SIZE;
     info.freeMemory = stats.freePages * Mem::PAGE_SIZE;
@@ -215,7 +249,7 @@ Arch::Frame* sysSystemInfo(Call const& c, Boot::Info const& boot) {
         info.greenShift = fb.greenShift;
         info.blueShift = fb.blueShift;
     }
-    memcpy(reinterpret_cast<void*>(address), &info, sizeof(info));
+    toUser(address, &info, sizeof(info));
     return c.result(Abi::OK);
 }
 
@@ -225,7 +259,11 @@ Arch::Frame* sysRandom(Call const& c) {
         return c.result(Abi::INVALID_ARGUMENT);
     if (not c.userMemory(address, length, true))
         return c.result(Abi::BAD_ADDRESS);
-    Random::fill(reinterpret_cast<u8*>(address), length);
+    u8 bytes[256];
+    Random::fill(bytes, length);
+    toUser(address, bytes, length);
+    memset(bytes, 0, sizeof(bytes)); // no copy stays behind on the kernel stack
+    asm volatile("" : : "r"(bytes) : "memory");
     return c.result(Abi::OK);
 }
 
@@ -237,7 +275,7 @@ Arch::Frame* sysFileOpen(Call const& c) {
         return c.result(Abi::INVALID_ARGUMENT);
     if (not c.userMemory(c.arg0(), length))
         return c.result(Abi::BAD_ADDRESS);
-    memcpy(name, reinterpret_cast<void const*>(c.arg0()), length);
+    fromUser(name, c.arg0(), length);
     name[length] = '\0';
     Core::SharedMemory* memory = Programs::file(name);
     if (not memory)
@@ -281,9 +319,8 @@ Arch::Frame* sysChannelCreate(Call const& c) {
         return c.result(Abi::NO_SPACE);
     }
 
-    auto* out = reinterpret_cast<Abi::Handle*>(address);
-    out[0] = ha;
-    out[1] = hb;
+    Abi::Handle out[2] = {ha, hb};
+    toUser(address, out, sizeof(out));
     return c.result(Abi::OK);
 }
 
@@ -310,8 +347,22 @@ Arch::Frame* sysChannelSend(Call const& c) {
     if (peer->full())
         return c.result(Abi::QUEUE_FULL);
 
+    // Objects in a queue hold references, so a cycle of them (an endpoint in
+    // its own queue, two endpoints in each other's) could never be freed.
+    // Refuse every way to start one: sending the receiving endpoint into its
+    // own queue, an endpoint that already holds channels or IRQs in its
+    // queue, or an IRQ bound to a channel.
+    if (Object* object = attach != Abi::NO_HANDLE ? c.task->handle(attach) : nullptr) {
+        if (object == peer)
+            return c.result(Abi::INVALID_ARGUMENT);
+        if (object->type == ObjectType::Channel and static_cast<Core::Endpoint*>(object)->holdsLinks())
+            return c.result(Abi::INVALID_ARGUMENT);
+        if (object->type == ObjectType::Irq and static_cast<Core::Irq*>(object)->bound)
+            return c.result(Abi::INVALID_ARGUMENT);
+    }
+
     Core::Message message;
-    memcpy(message.data, reinterpret_cast<void const*>(address), length);
+    fromUser(message.data, address, length);
     message.size = static_cast<u32>(length);
     message.attached = attach != Abi::NO_HANDLE ? c.task->takeHandle(attach) : nullptr;
     peer->push(message);
@@ -359,9 +410,9 @@ Arch::Frame* sysChannelRecv(Call const& c) {
         message.attached->unref(); // the receiver didn't ask for handles
     }
 
-    memcpy(reinterpret_cast<void*>(buffer), message.data, message.size);
+    toUser(buffer, message.data, message.size);
     if (handleOut)
-        *reinterpret_cast<Abi::Handle*>(handleOut) = received;
+        toUser(handleOut, &received, sizeof(received));
 
     i64 size = message.size;
     endpoint->pop();
@@ -392,7 +443,9 @@ Arch::Frame* sysWait(Call const& c) {
         return finish(Abi::BAD_ADDRESS, nullptr, 0);
 
     Abi::Handle handles[Abi::MAX_WAIT];
-    memcpy(handles, reinterpret_cast<void const*>(address), count * sizeof(Abi::Handle));
+    fromUser(handles, address, count * sizeof(Abi::Handle));
+    if (timeout != Abi::WAIT_FOREVER and timeout > MAX_TIMEOUT_MS)
+        timeout = MAX_TIMEOUT_MS;
 
     Core::Endpoint* endpoints[Abi::MAX_WAIT];
     for (u64 i = 0; i < count; i++) {
@@ -439,11 +492,18 @@ Arch::Frame* sysMemoryUnmap(Call const& c) {
 }
 
 Arch::Frame* sysMemoryCreate(Call const& c) {
+    if (c.arg0() == 0 or c.arg0() > Core::SharedMemory::MAX_SIZE)
+        return c.result(Abi::INVALID_ARGUMENT);
+    u64 pages = Mem::alignUp(c.arg0(), Mem::PAGE_SIZE) / Mem::PAGE_SIZE;
+    if (not c.task->quota->charge(pages))
+        return c.result(Abi::OUT_OF_MEMORY);
     auto* memory = Core::SharedMemory::allocate(c.arg0());
-    if (not memory)
-        return c.result(c.arg0() == 0 or c.arg0() > Core::SharedMemory::MAX_SIZE
-                            ? Abi::INVALID_ARGUMENT
-                            : Abi::OUT_OF_MEMORY);
+    if (not memory) {
+        c.task->quota->refund(pages);
+        return c.result(Abi::OUT_OF_MEMORY);
+    }
+    memory->charged = c.task->quota;
+    c.task->quota->ref();
 
     u64 handle = c.task->addHandle(memory);
     if (not handle) {
@@ -500,6 +560,8 @@ Arch::Frame* sysMemoryAlloc(Call const& c) {
     u64 pages = size / Mem::PAGE_SIZE;
     if (not Pmm::userCanUse(pages + pages / 512 + 3)) // + page tables
         return c.result(Abi::OUT_OF_MEMORY);
+    if (not c.task->quota->charge(pages))
+        return c.result(Abi::OUT_OF_MEMORY);
 
     auto& space = *c.task->space;
     for (u64 offset = 0; offset < size; offset += Mem::PAGE_SIZE) {
@@ -515,6 +577,7 @@ Arch::Frame* sysMemoryAlloc(Call const& c) {
                     Pmm::free(physical);
             }
             space.unmap(address, offset);
+            c.task->quota->refund(pages);
             return c.result(Abi::OUT_OF_MEMORY);
         }
     }
@@ -606,7 +669,7 @@ Arch::Frame* sysDeviceInfo(Call const& c) {
     info.irqLine = device->irqLine;
     for (int i = 0; i < 6; i++)
         info.barSize[i] = device->bars[i].io ? 0 : device->bars[i].size;
-    memcpy(reinterpret_cast<void*>(c.arg1()), &info, sizeof(info));
+    toUser(c.arg1(), &info, sizeof(info));
     return c.result(Abi::OK);
 }
 
@@ -664,7 +727,7 @@ Arch::Frame* dispatch(Arch::Frame* frame) {
         return Sched::switchFrom(frame);
     case Abi::SYS_SLEEP:
         c.result(Abi::OK);
-        return Sched::sleepCurrent(frame, c.arg0());
+        return Sched::sleepCurrent(frame, min(c.arg0(), MAX_TIMEOUT_MS));
     case Abi::SYS_TASK_ID: return c.result(static_cast<i64>(c.task->id));
     case Abi::SYS_TIME: return c.result(static_cast<i64>(Time::now()));
     case Abi::SYS_SPAWN: return sysSpawn(c);

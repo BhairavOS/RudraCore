@@ -54,6 +54,11 @@ void Task::releaseResources() {
             mapping = {};
         }
     }
+
+    if (quota) {
+        quota->unref();
+        quota = nullptr;
+    }
 }
 
 } // namespace Rudracore::Core

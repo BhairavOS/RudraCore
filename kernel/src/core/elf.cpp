@@ -2,6 +2,9 @@
 
 #include "mem/memory.h"
 #include "mem/pmm.h"
+#include "core/sched.h"
+
+static_assert(Rudracore::Elf::USER_IMAGE_END <= Rudracore::Core::Task::MAP_BASE, "program images must stay below shared memory");
 
 extern "C" void* memcpy(void* dest, void const* src, usize n);
 
@@ -42,6 +45,10 @@ constexpr u8 LITTLE_ENDIAN = 1;
 constexpr u16 TYPE_EXECUTABLE = 2;
 constexpr u16 MACHINE_X86_64 = 62;
 constexpr u32 SEGMENT_LOAD = 1;
+constexpr u32 SEGMENT_DYNAMIC = 2;
+constexpr u32 SEGMENT_INTERP = 3;
+constexpr u8 VERSION_CURRENT = 1;
+constexpr u16 MAX_PROGRAM_HEADERS = 64;
 constexpr u32 FLAG_EXEC = 1;
 constexpr u32 FLAG_WRITE = 2;
 
@@ -59,12 +66,12 @@ bool validHeader(u8 const* data, usize size, char const*& error) {
         error = "not an ELF file";
         return false;
     }
-    if (h->ident[4] != CLASS_64 or h->ident[5] != LITTLE_ENDIAN or
-        h->machine != MACHINE_X86_64 or h->type != TYPE_EXECUTABLE) {
+    if (h->ident[4] != CLASS_64 or h->ident[5] != LITTLE_ENDIAN or h->ident[6] != VERSION_CURRENT or
+        h->version != VERSION_CURRENT or h->machine != MACHINE_X86_64 or h->type != TYPE_EXECUTABLE) {
         error = "not a 64-bit x86_64 executable";
         return false;
     }
-    if (h->programHeaderSize != sizeof(ProgramHeader) or
+    if (h->programHeaderSize != sizeof(ProgramHeader) or h->programHeaderCount > MAX_PROGRAM_HEADERS or
         h->programHeaderOffset > size or
         h->programHeaderCount > (size - h->programHeaderOffset) / sizeof(ProgramHeader)) {
         error = "bad program header table";
@@ -73,10 +80,61 @@ bool validHeader(u8 const* data, usize size, char const*& error) {
     return true;
 }
 
+u64 firstPage(ProgramHeader const& ph) { return Mem::alignDown(ph.vaddr, Mem::PAGE_SIZE); }
+u64 endPage(ProgramHeader const& ph) { return Mem::alignUp(ph.vaddr + ph.memorySize, Mem::PAGE_SIZE); }
+
+// Checks every program header before anything is allocated: a static
+// executable, segments inside the image area, file offsets that can be
+// mapped page by page, no page both writable and executable (also when two
+// segments share a page), and an entry point in executable code.
+bool validSegments(ProgramHeader const* headers, u16 count, u64 size, u64 entry, char const*& error) {
+    bool entryOk = false;
+    for (u16 i = 0; i < count; i++) {
+        ProgramHeader const& ph = headers[i];
+        if (ph.type == SEGMENT_DYNAMIC or ph.type == SEGMENT_INTERP) {
+            error = "dynamically linked programs aren't supported";
+            return false;
+        }
+        if (ph.type != SEGMENT_LOAD or ph.memorySize == 0)
+            continue;
+        u64 end = ph.vaddr + ph.memorySize;
+        if (ph.fileSize > ph.memorySize or ph.offset > size or ph.fileSize > size - ph.offset or
+            end < ph.vaddr or ph.vaddr < USER_MIN or end > USER_IMAGE_END) {
+            error = "segment outside of the allowed range";
+            return false;
+        }
+        if ((ph.flags & FLAG_WRITE) and (ph.flags & FLAG_EXEC)) {
+            error = "a segment is both writable and executable";
+            return false;
+        }
+        if ((ph.vaddr - ph.offset) % Mem::PAGE_SIZE != 0) {
+            error = "segment address and file offset don't line up on a page";
+            return false;
+        }
+        for (u16 j = 0; j < i; j++) {
+            ProgramHeader const& other = headers[j];
+            if (other.type != SEGMENT_LOAD or other.memorySize == 0)
+                continue;
+            bool overlap = firstPage(ph) < endPage(other) and firstPage(other) < endPage(ph);
+            if (overlap and (ph.flags & (FLAG_WRITE | FLAG_EXEC)) != (other.flags & (FLAG_WRITE | FLAG_EXEC))) {
+                error = "two segments with different permissions share a page";
+                return false;
+            }
+        }
+        if ((ph.flags & FLAG_EXEC) and entry >= ph.vaddr and entry < end)
+            entryOk = true;
+    }
+    if (not entryOk) {
+        error = "the entry point isn't in executable code";
+        return false;
+    }
+    return true;
+}
+
 bool loadSegment(Vmm::Space& space, u8 const* data, usize size, ProgramHeader const& ph, char const*& error) {
     u64 end = ph.vaddr + ph.memorySize;
     if (ph.fileSize > ph.memorySize or ph.offset > size or ph.fileSize > size - ph.offset or
-        end < ph.vaddr or ph.vaddr < USER_MIN or end > USER_STACK_TOP - USER_STACK_SIZE) {
+        end < ph.vaddr or ph.vaddr < USER_MIN or end > USER_IMAGE_END) {
         error = "segment outside of the allowed range";
         return false;
     }
@@ -142,6 +200,10 @@ bool load(u8 const* data, usize size, Program& out, char const*& error) {
         error = "entry point outside of user memory";
         return false;
     }
+
+    auto const* phdrs = reinterpret_cast<ProgramHeader const*>(data + header->programHeaderOffset);
+    if (not validSegments(phdrs, header->programHeaderCount, size, header->entry, error))
+        return false;
 
     Vmm::Space* space = Vmm::createUserSpace();
     if (not space) {

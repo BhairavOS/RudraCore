@@ -77,10 +77,41 @@ void wakeSleepers(u64 now) {
     }
 }
 
+// Kernel stacks live in their own area of the kernel half, one slot each,
+// with an unmapped guard page below the stack: an overflow faults (and the
+// double-fault handler, on its own stack, reports it) instead of silently
+// overwriting whatever memory comes next.
+constexpr u64 STACK_AREA = 0xffffff0000000000;
+constexpr u64 STACK_SLOT = (STACK_PAGES + 1) * Mem::PAGE_SIZE;
+constexpr u64 MAX_STACKS = 4096;
+u64 stackSlots[MAX_STACKS / 64]; // bit set = slot in use
+
+// Maps `physical` as a guarded kernel stack. Returns its top, or 0.
+u64 mapKernelStack(u64 physical) {
+    for (u64 slot = 0; slot < MAX_STACKS; slot++) {
+        if (stackSlots[slot / 64] & (1ull << (slot % 64)))
+            continue;
+        u64 base = STACK_AREA + slot * STACK_SLOT + Mem::PAGE_SIZE; // the page below stays unmapped
+        if (not Vmm::kernelSpace().map(base, physical, STACK_PAGES * Mem::PAGE_SIZE, Vmm::READ | Vmm::WRITE))
+            return 0;
+        stackSlots[slot / 64] |= 1ull << (slot % 64);
+        return base + STACK_PAGES * Mem::PAGE_SIZE;
+    }
+    return 0;
+}
+
+void unmapKernelStack(u64 top) {
+    u64 slot = (top - STACK_AREA) / STACK_SLOT - 1;
+    Vmm::kernelSpace().unmap(top - STACK_PAGES * Mem::PAGE_SIZE, STACK_PAGES * Mem::PAGE_SIZE);
+    stackSlots[slot / 64] &= ~(1ull << (slot % 64));
+}
+
 void destroy(Task* t) {
     t->releaseResources();
-    if (t->stackPhysical)
+    if (t->stackPhysical) {
+        unmapKernelStack(t->stackTop);
         Pmm::free(t->stackPhysical, STACK_PAGES);
+    }
     delete t;
 }
 
@@ -103,6 +134,11 @@ Task* newTask(char const* name) {
     u64 stack = Pmm::alloc(STACK_PAGES);
     if (not stack)
         return nullptr;
+    u64 top = mapKernelStack(stack);
+    if (not top) {
+        Pmm::free(stack, STACK_PAGES);
+        return nullptr;
+    }
 
     Task* t = new Task{};
     t->id = nextId++;
@@ -110,7 +146,7 @@ Task* newTask(char const* name) {
         t->name[i] = name[i];
     Arch::Fpu::initState(t->fpuState);
     t->stackPhysical = stack;
-    t->stackTop = reinterpret_cast<u64>(Mem::toVirtual(stack)) + STACK_PAGES * Mem::PAGE_SIZE;
+    t->stackTop = top;
     return t;
 }
 
@@ -189,6 +225,8 @@ Task* spawnUser(char const* name, Vmm::Space* space, u64 entry, u64 stackTop,
     }
 
     t->space = space;
+    // Half of RAM per program: shortcut, a fixed share; per-program limits set by init could come later.
+    t->quota = new Core::Quota(Pmm::stats().managedPages / 2);
     for (usize i = 0; i < handleCount and i + 1 < Task::MAX_HANDLES; i++)
         t->handles[i + 1] = handles[i];
 

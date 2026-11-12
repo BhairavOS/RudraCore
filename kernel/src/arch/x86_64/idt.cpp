@@ -5,6 +5,7 @@
 #include "arch/x86_64/frame.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/pic.h"
+#include "arch/x86_64/protect.h"
 #include "core/device.h"
 #include "core/sched.h"
 #include "core/syscall.h"
@@ -93,6 +94,9 @@ void logRegisters(Frame const& f) {
     log("RudraCore caught a '", exceptionName(f.vector), "' (vector ", f.vector,
         ", error ", Hex{f.error}, ")");
     log("in ", (f.cs & 3) ? "user mode" : "kernel mode");
+    if (f.vector == 8)
+        log("(a fault while handling a fault: most often a kernel stack overflow into its guard page, at ",
+            Hex{readCr2()}, ")");
 
     if (f.vector == VECTOR_PAGE_FAULT) {
         log("");
@@ -154,6 +158,7 @@ using namespace Rudracore::Arch;
 // interrupts disabled. Returns the frame to resume: the same one, or another
 // task's when the scheduler switches.
 extern "C" Frame* interruptDispatch(Frame* frame) {
+    Protect::closeUserAccess();
     u64 vector = frame->vector;
     bool fromUser = frame->cs & 3;
 

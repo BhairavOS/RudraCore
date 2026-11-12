@@ -1,6 +1,7 @@
 # Bhairav OS security assessment
 
-Status: first audit, 2026-11-12, of commit `38a627f` plus the fix in §6.
+Status: first audit, 2026-11-12, of commit `38a627f`, plus the fixes in
+§6 (memory reserve) and §7 (kernel hardening round).
 Scope: everything I read line by line is marked **reviewed**. Anything
 else is marked **not reviewed** and makes no claim. Nothing here is a
 certification or a formal proof.
@@ -25,14 +26,15 @@ file loader.
 | Syscall pointer validation | **Enforced** | `isUserRange` checks the range is below `USER_END`, has no overflow, is mapped, and is writable when written. Every pointer argument goes through it. |
 | W^X for user programs | **Enforced** | The ELF loader rejects W+X segments. NX is set on every non-EXEC leaf. EFER.NXE is set (ShoolLoader `handover.cpp`, Limine). |
 | W^X for the kernel image | **Enforced** | `.text` is R-X, `.rodata` R--, `.data` RW-. The direct map is RW and NX. |
-| CR0.WP | **Enforced** | Set by ShoolLoader. |
-| SMEP / SMAP | **Not enabled** | CR4 bits 20/21 are never set. The kernel can run or touch user pages. |
-| Kernel stack guard pages | **None** | Kernel stacks are 4 pages in the direct map, with nothing between them. |
-| User stack guard | **Partial** | 64 KiB stack. An ELF segment may end right at its bottom. |
+| W^X for every alias | **Enforced (§7)** | The direct-map alias of the kernel's code and constants is now read-only too. |
+| NX / CR0.WP | **Enforced (§7)** | The kernel sets EFER.NXE and CR0.WP itself, and refuses to boot on a CPU without NX. |
+| SMEP / SMAP | **Enforced when the CPU has them (§7)** | SMAP allows user memory only inside two copy helpers. AC is cleared on every kernel entry. |
+| Kernel stack guard pages | **Enforced (§7)** | Each kernel stack sits in its own slot with an unmapped page below. The boot task's static stack is the one exception. |
+| User stack guard | **Enforced (§7)** | Programs must load below 4 GiB. The stack sits below 128 TiB with nothing mapped under it but shared memory far below. |
 | Handles | **Enforced, no rights** | Per-task tables of 64 slots, typed lookup, and **move-only** transfer (there is no duplicate call). No READ/WRITE/MAP rights, no generation counter. |
 | Who reaches hardware | **Enforced by delegation** | Only init gets IRQ, I/O-port and PCI handles. It moves them to the drivers (ps2, ahci, e1000/rtl8139). |
 | DMA isolation | **None** | No IOMMU. `SYS_DEVICE_BAR` turns on bus mastering. A driver can make its device DMA to any physical address. |
-| Kernel memory accounting | **Added in §6** | Before: none. Any program could crash the kernel (V-01). |
+| Kernel memory accounting | **Added in §6 and §7** | A 4 MiB kernel reserve, plus a per-program quota of half of RAM. |
 | Boot integrity | **None** | ShoolLoader and Limine load every module with no signature or hash. |
 | TLS server authentication | **None** | The certificate is skipped. README states this. |
 | Package integrity | **None** | BPK has no hash or signature. Repositories may be plain `http://`. |
@@ -87,10 +89,10 @@ firmware↔ShoolLoader↔kernel.
 | V-02 | Critical | **Packages have no integrity.** BPK (`tools/bpk.cpp`) has no hash or signature, apt accepts `http://` sources, and `https://` doesn't authenticate the server. Anyone on the path can replace an app. | Open |
 | V-03 | Critical | **Apps get the whole disk and network.** `KamalShell::launch` gives every app, built-in or third-party, an unrestricted `fs` and `net` channel. One bad app can overwrite `/apps/<other>/app.elf`. | Open |
 | V-04 | High | **TLS doesn't check the server certificate.** `tls.cpp` parses the Certificate message and drops it. There is no X.509 parsing, chain, hostname or expiry check, and no trust store. | Open (known) |
-| V-05 | Medium | **Endpoint reference cycles leak kernel memory for good.** Send endpoint `y` over its peer `x` and `y` lands in its own queue holding a reference to itself. Close `x` and `y` can never be freed. Longer cycles work too. With V-01 fixed this is bounded memory loss, no longer a crash. | Open |
+| V-05 | Medium | **Endpoint reference cycles leak kernel memory for good.** Send endpoint `y` over its peer `x` and `y` lands in its own queue holding a reference to itself. Close `x` and `y` can never be freed. Longer cycles work too. | **Fixed, §7** |
 | V-06 | Medium | **Dead tasks' memory wasn't freed while nothing else was runnable.** Zombies were reaped only at a task switch away from a ready task. | **Fixed, §6** (reaped on each timer tick) |
-| V-07 | Low | **Log spoofing.** `SYS_LOG` writes user bytes, including newlines, into the kernel log after a `[name]` prefix. Spawned app names are user-chosen (`SpawnImage.name`), so an app can call itself `init` in the log. | Open |
-| V-08 | Low | **An ELF segment can overlap the shared-memory window (≥ 4 GiB).** A later `memory_map` or `memory_alloc` then overwrites an OWNED PTE and leaks that page. It only hurts the task itself. | Open |
+| V-07 | Low | **Log spoofing.** `SYS_LOG` writes user bytes, including newlines, into the kernel log after a `[name]` prefix. Spawned app names are user-chosen (`SpawnImage.name`), so an app can call itself `init` in the log. | **Fixed, §7** |
+| V-08 | Low | **An ELF segment can overlap the shared-memory window (≥ 4 GiB).** A later `memory_map` or `memory_alloc` then overwrites an OWNED PTE and leaks that page. It only hurts the task itself. | **Fixed, §7** |
 
 ### Architectural weaknesses / insecure assumptions
 
@@ -136,10 +138,10 @@ replaced or read by any app.
 | 1 | Per-app storage isolation | kamalshell, fs | `fs` connection bound to a root (`/apps/<id>/data`); only Files and Terminal get `/`. Use a `Connect` field set by KamalShell (apps can't forge it, because the shell is the one connecting) | – | M | fs-test case: an app opening `/apps/other/app.elf` gets refused |
 | 2 | Package signatures | tools/bpk, apt, apps.cpp | Ed25519 signature over the BPK. Public key in the boot image. Refuse unsigned packages. Repo index signed (anti-rollback: version must not decrease) | Ed25519 implementation + RFC 8032 test vectors | M | Tampered or unsigned `.bpk` refused; vectors in tls-test |
 | 3 | X.509 + chain + hostname + expiry | kapala/tls, new x509.cpp | DER parser, RSA-PKCS1/PSS and ECDSA-P256 verify, trust store file in the boot image, fail closed | Bignum/P-256 code | L | Bad-cert test servers (expired, wrong host, self-signed) must fail |
-| 4 | Endpoint cycle prevention | channel, syscall | Refuse to send an endpoint whose queue isn't empty, or an endpoint over its own peer. Or add per-task object quotas | – | S | ipc-test case |
-| 5 | SMEP (then SMAP) | arch/cpu init, syscall copy paths | Set CR4.SMEP when CPUID says so. For SMAP, wrap user copies in `stac/clac` helpers | – | S / M | protect-test: kernel exec of a user page must fault (debug build) |
+| 4 | ✅ Endpoint cycle prevention | channel, syscall | §7 | – | S | harden-test |
+| 5 | ✅ SMEP and SMAP | arch/protect, syscall copy paths | §7 | – | S / M | `FAULT_TEST=smep\|smap` |
 | 6 | Handle rights + generations | object, task, syscalls | `Handle = (gen << 8) \| slot`, rights mask per handle, `handle_restrict(h, rights)` | ABI change: all programs | M | Stale/forged handle tests |
-| 7 | Kernel stack guard pages | sched | Map kernel stacks in a vmalloc area with unmapped guards | – | M | Deliberate overflow faults cleanly (PANIC_TEST variant) |
+| 7 | ✅ Kernel stack guard pages | sched | §7 | – | M | `FAULT_TEST=stack` |
 | 8 | Verified boot | shoolloader | Hash every module and verify a signed manifest. Document the Limine/BIOS path as unverified | P2's signature code | M | Altered module refused |
 | 9 | Capture service + firewall hook | e1000/rtl8139, net | Shared-memory ring, policy in `net` | P1 | L | Fuzzed frames; policy tests |
 | 10 | VT-d | new kernel ACPI DMAR + IOMMU code | Per-device page tables | ACPI parsing | XL | QEMU `-device intel-iommu`: DMA outside a mapping faults |
@@ -180,3 +182,28 @@ starve other apps of memory (they get `OUT_OF_MEMORY`), but no longer the
 kernel. Per-task accounting is the follow-up. `memory_map` page tables and
 `device_bar` objects aren't counted: they're bounded (32 mappings, driver
 only) and the reserve absorbs them.
+
+## 7. Kernel hardening round
+
+Each item below was built, then booted in QEMU (q35, 256 MiB). The test
+setups were: the default CPU model (no SMEP/SMAP), `-cpu max` (both), BIOS,
+and UEFI.
+
+| Item | What changed | How it's checked |
+|---|---|---|
+| SMEP | Set in CR4 when CPUID leaf 7 reports it (`arch/x86_64/protect.cpp`). | `FAULT_TEST=smep`: the kernel calls a user page and gets `page fault … protection violation, instruction fetch`. |
+| SMAP | Set when supported. The kernel touches user memory only in `fromUser`/`toUser` (`core/syscall.cpp`), which open it with STAC/CLAC. `interruptDispatch` runs CLAC first, because ring 3 can set RFLAGS.AC and an interrupt doesn't clear it. | `FAULT_TEST=smap`: a plain kernel read of a user page faults. Every boot check still passes with SMAP on, and the browser opens and renders. |
+| Kernel stack guards | Kernel stacks are mapped at `0xffffff0000000000` in 20 KiB slots, with an unmapped page below each 16 KiB stack. Overflow → #PF can't be pushed → #DF on its IST stack → panic that names the guard address. | `FAULT_TEST=stack`: `double fault … kernel stack overflow into its guard page, at 0xffffff000000afd8`. |
+| User stack guard | ELF segments must end below 4 GiB (`Elf::USER_IMAGE_END`, static_assert ≤ `Task::MAP_BASE`). The stack below 128 TiB has no mapping beneath it. This also fixes V-08, since images can no longer overlap the shared-memory window. | harden-test: a segment at 5 GiB is refused. |
+| NX and W^X | The kernel sets EFER.NXE (and panics without NX) and CR0.WP itself. The direct-map alias of `.text`/`.rodata` is read-only. | Every boot works with the stricter mappings. |
+| Memory quotas | `Core::Quota`: half of RAM per program, charged by `memory_alloc` and `memory_create`. Shared memory refunds its creator when freed, even after that program has ended (the quota is reference counted). | oom-test: one program stops at 124 of 248 MiB. With a helper taking the rest, the kernel reserve still refuses channel, memory and spawn requests. |
+| Syscall validation | Log text and spawned app names have control characters replaced (V-07). `sleep` and `wait` timeouts are capped so deadlines can't wrap. Channel sends refuse anything that could start a reference cycle (V-05). | harden-test: both cycle shapes are refused. A forged newline in the log stays on one line. |
+| ELF validation | All headers are checked before anything is allocated: EI_VERSION, at most 64 program headers, no PT_INTERP/PT_DYNAMIC, segment address and file offset congruent mod 4 KiB, no shared page with different rights, entry point in an executable segment. | harden-test: 6 crafted bad files refused, and a good one still runs. |
+| Object lifetime | Audit: references are held by handles, mappings, queued messages and bound IRQs. Cycles were the only leak (fixed above). `Object::ref()` now traps rather than wrap a u32 count. Waiters are cleared on wake, on wait exit and in `releaseResources`. | Code review, plus the cycle tests. |
+| Info leaks | `system_info` zeroes padding (4 bytes after `reserved` used to carry stale kernel stack). `random` output is built in a kernel buffer that is wiped afterwards. Every other output struct and new page was already zeroed. | harden-test: the padding is checked for zero. |
+
+**Not covered.** ELF segments still don't count toward the quota (bounded
+by the loader's 256 MiB per program and the kernel reserve). The boot
+task's static stack has no guard page. SMEP and SMAP are off on CPUs
+without them, which includes QEMU's default model. Handle rights and
+generation counters (roadmap item 6) are not done.

@@ -41,6 +41,10 @@ struct Endpoint : public Object {
     Message& front() { return queue[head]; }
     void pop();
 
+    // True if a channel or IRQ is waiting in this endpoint's queue: then the
+    // endpoint itself must not be sent anywhere (it could close a cycle).
+    bool holdsLinks() const;
+
     void wakeWaiter();
 };
 

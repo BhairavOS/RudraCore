@@ -276,8 +276,18 @@ void init(Boot::Info const& info) {
     mapKernelSection(info, __data_start, __data_end, READ | WRITE, "data  ");
 
     // Direct map of physical memory, at the same offset the bootloader used,
-    // so pointers into it (like the framebuffer) stay valid.
+    // so pointers into it (like the framebuffer) stay valid. The kernel's
+    // code and constants appear here too: that alias is read-only, so
+    // kernel code can't be rewritten through it (W^X holds for every alias).
+    u64 roStart = Mem::alignDown(reinterpret_cast<u64>(__requests_start), SIZE_4K) - info.kernelVirtualBase +
+                  info.kernelPhysicalBase;
+    u64 roEnd = Mem::alignUp(reinterpret_cast<u64>(__rodata_end), SIZE_4K) - info.kernelVirtualBase +
+                info.kernelPhysicalBase;
     u64 mapped = 0;
+    auto mapRange = [&](u64 base, u64 end, u32 access, Cache cache) {
+        if (base < end and not kernel.map(info.hhdmOffset + base, base, end - base, access, cache))
+            panic("vmm: failed to build the direct map");
+    };
     for (usize i = 0; i < info.regionCount; i++) {
         auto const& r = info.regions[i];
         if (not isDirectMapped(r.type))
@@ -286,8 +296,9 @@ void init(Boot::Info const& info) {
         u64 base = Mem::alignDown(r.base, SIZE_4K);
         u64 end = Mem::alignUp(r.base + r.length, SIZE_4K);
         Cache cache = r.type == Boot::RegionType::Framebuffer ? Cache::WriteCombining : Cache::WriteBack;
-        if (not kernel.map(info.hhdmOffset + base, base, end - base, READ | WRITE, cache))
-            panic("vmm: failed to build the direct map");
+        mapRange(base, min(end, roStart), READ | WRITE, cache);
+        mapRange(max(base, roStart), min(end, roEnd), READ, cache);
+        mapRange(max(base, roEnd), end, READ | WRITE, cache);
         mapped += end - base;
     }
     log("[vmm]  direct map ", Bytes{mapped}, " at ", Hex{info.hhdmOffset});

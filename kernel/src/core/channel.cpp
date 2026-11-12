@@ -37,6 +37,15 @@ void Endpoint::pop() {
     count--;
 }
 
+bool Endpoint::holdsLinks() const {
+    for (u32 i = 0; i < count; i++) {
+        Object const* attached = queue[(head + i) % QUEUE_CAPACITY].attached;
+        if (attached and (attached->type == ObjectType::Channel or attached->type == ObjectType::Irq))
+            return true;
+    }
+    return false;
+}
+
 void Endpoint::wakeWaiter() {
     if (Task* t = waiter) {
         waiter = nullptr;

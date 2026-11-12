@@ -25,7 +25,11 @@ struct Object {
     Object(Object const&) = delete;
     Object& operator=(Object const&) = delete;
 
-    void ref() { refs++; }
+    void ref() {
+        if (refs == ~0u) // a wrap to 0 would free a live object
+            __builtin_trap();
+        refs++;
+    }
 
     void unref() {
         if (--refs == 0)

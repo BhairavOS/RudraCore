@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/frame.h"
 #include "core/object.h"
+#include "core/quota.h"
 #include "mem/vmm.h"
 
 namespace Rudracore::Core {
@@ -39,6 +40,7 @@ struct Task {
     u64 stackTop = 0;      // also where the CPU enters the kernel from user mode
 
     Vmm::Space* space = nullptr; // nullptr for kernel tasks
+    Quota* quota = nullptr;      // user tasks: the memory it may hold (holds a reference)
     u64 wakeAt = 0;
     u64 waitDeadline = 0; // while in a timed SYS_WAIT: when it gives up (0 = none)
     i64 exitCode = 0;

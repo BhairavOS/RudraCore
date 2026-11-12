@@ -3,6 +3,7 @@
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/io.h"
 #include "arch/x86_64/pic.h"
+#include "arch/x86_64/protect.h"
 #include "boot.h"
 #include "config.h"
 #include "core/device.h"
@@ -139,6 +140,37 @@ void clockTask(u64) {
     }
 }
 
+// FAULT_TEST=stack|smep|smap builds: the kernel breaks one protection on
+// purpose. Each must end in a panic naming the fault (see README).
+[[maybe_unused]] void overflowStack(u64 depth) {
+    volatile u8 buffer[512];
+    buffer[0] = static_cast<u8>(depth);
+    if (depth != ~0ull) // never false; keeps the compiler from calling this an infinite loop
+        overflowStack(depth + 1);
+    buffer[1] = buffer[0]; // not a tail call: every level keeps its frame
+}
+
+void faultTest() {
+    if constexpr (RUDRACORE_FAULT_TEST == 1) {
+        log("[test] a kernel task overflows its stack on purpose: the guard page must stop it");
+        Sched::spawnKernel("overflow", overflowStack, 0);
+    } else if constexpr (RUDRACORE_FAULT_TEST == 2 or RUDRACORE_FAULT_TEST == 3) {
+        // A user page in the kernel's own (otherwise empty) lower half.
+        constexpr u64 USER_PAGE = 0x400000;
+        u64 page = Pmm::allocZeroed();
+        *Mem::toVirtual<u8>(page) = 0xC3; // ret
+        Vmm::kernelSpace().map(USER_PAGE, page, Mem::PAGE_SIZE, Vmm::USER | Vmm::EXEC);
+        if constexpr (RUDRACORE_FAULT_TEST == 2) {
+            log("[test] the kernel runs code in a user page on purpose: SMEP must stop it");
+            reinterpret_cast<void (*)()>(USER_PAGE)();
+        } else {
+            log("[test] the kernel reads a user page on purpose: SMAP must stop it");
+            (void)*reinterpret_cast<u8 volatile*>(USER_PAGE);
+        }
+        log("[test] FAILED: the kernel got through");
+    }
+}
+
 // Starts init, the root of userspace, and hands it the hardware: it decides
 // which driver gets what. The kernel itself never starts other programs.
 void startInit(Boot::Info const& info) {
@@ -221,12 +253,14 @@ extern "C" [[noreturn]] void kmain(u64 bootMagic, u64 bootInfo) {
     Arch::Idt::init();
     Arch::Pic::init();
     Arch::Fpu::init();
+    Arch::Protect::init();
     log("[cpu]  gdt + tss loaded, idt ready (256 vectors), pic remapped and masked, sse on");
     testInterrupts();
 
     Pmm::init(info);
     Vmm::init(info);
     log("[vmm]  running on RudraCore's own page tables");
+    Arch::Protect::enableSmepSmap();
     Pmm::reclaimBootloaderMemory(info);
     logMemory("");
 
@@ -247,6 +281,7 @@ extern "C" [[noreturn]] void kmain(u64 bootMagic, u64 bootInfo) {
     Syscall::init(info);
     Sched::spawnKernel("clock", clockTask, 0);
     startInit(info);
+    faultTest();
 
     log("[sched] starting: 1 ms timer, 10 ms time slices");
     log("");

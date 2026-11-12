@@ -136,10 +136,14 @@ $(BUILD)/logo.rgba: assets/bhairav-logo.jpg
 #   PANIC_TEST=1  makes the kernel fault on purpose to show the panic screen.
 #   SECURITY_TEST=1  init first runs oom-test (a program uses up all memory;
 #                    the kernel must refuse it, not panic).
+#   FAULT_TEST=stack|smep|smap  the kernel breaks that protection on purpose:
+#                    the boot must end in a panic naming the fault. Run with
+#                    CPU=max so QEMU emulates SMEP and SMAP.
 $(BUILD)/config.h: FORCE
 	@mkdir -p $(@D)
 	@echo '#define RUDRACORE_PANIC_TEST $(if $(PANIC_TEST),1,0)' > $@.tmp
 	@echo '#define BHAIRAV_SECURITY_TEST $(if $(SECURITY_TEST),1,0)' >> $@.tmp
+	@echo '#define RUDRACORE_FAULT_TEST $(if $(filter stack,$(FAULT_TEST)),1,$(if $(filter smep,$(FAULT_TEST)),2,$(if $(filter smap,$(FAULT_TEST)),3,0)))' >> $@.tmp
 	@cmp -s $@.tmp $@ || mv $@.tmp $@
 	@rm -f $@.tmp
 
