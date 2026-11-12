@@ -265,6 +265,9 @@ Arch::Frame* sysChannelCreate(Call const& c) {
     u64 address = c.arg0();
     if (not c.userMemory(address, 2 * sizeof(Abi::Handle), true))
         return c.result(Abi::BAD_ADDRESS);
+    // Two endpoints, each a little over one page of kernel heap.
+    if (not Pmm::userCanUse(2 * (sizeof(Core::Endpoint) / Mem::PAGE_SIZE + 1)))
+        return c.result(Abi::OUT_OF_MEMORY);
 
     Core::Endpoint *a, *b;
     Core::Endpoint::createPair(a, b);
@@ -494,6 +497,9 @@ Arch::Frame* sysMemoryAlloc(Call const& c) {
     u64 address = c.task->nextMapAddress;
     if (address + size > MAP_LIMIT)
         return c.result(Abi::NO_SPACE);
+    u64 pages = size / Mem::PAGE_SIZE;
+    if (not Pmm::userCanUse(pages + pages / 512 + 3)) // + page tables
+        return c.result(Abi::OUT_OF_MEMORY);
 
     auto& space = *c.task->space;
     for (u64 offset = 0; offset < size; offset += Mem::PAGE_SIZE) {

@@ -289,6 +289,7 @@ Arch::Frame* switchFrom(Arch::Frame* frame) {
 Arch::Frame* onTimerTick(Arch::Frame* frame) {
     Time::tick();
     Random::stir();
+    reapZombies(); // free a finished task's memory now, even if nothing else is ready to run
     u64 now = Time::now();
     wakeSleepers(now);
 

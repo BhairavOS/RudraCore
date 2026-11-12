@@ -100,7 +100,7 @@ bool loadSegment(Vmm::Space& space, u8 const* data, usize size, ProgramHeader co
             if (not physical or not space.map(page, physical, Mem::PAGE_SIZE, access)) {
                 if (physical)
                     Pmm::free(physical);
-                error = "out of memory";
+                error = OUT_OF_MEMORY;
                 return false;
             }
         }
@@ -145,7 +145,7 @@ bool load(u8 const* data, usize size, Program& out, char const*& error) {
 
     Vmm::Space* space = Vmm::createUserSpace();
     if (not space) {
-        error = "out of memory";
+        error = OUT_OF_MEMORY;
         return false;
     }
 
@@ -166,6 +166,15 @@ bool load(u8 const* data, usize size, Program& out, char const*& error) {
         total += headers[i].memorySize;
     }
 
+    // All it will take: segments (each may straddle one more page), page
+    // tables, its stack, and the task's kernel stack and state.
+    u64 pages = total / Mem::PAGE_SIZE + 2 * header->programHeaderCount + USER_STACK_SIZE / Mem::PAGE_SIZE + 16;
+    if (not Pmm::userCanUse(pages)) {
+        error = OUT_OF_MEMORY;
+        Vmm::destroyUserSpace(space);
+        return false;
+    }
+
     bool loadedAny = false;
     for (u16 i = 0; i < header->programHeaderCount; i++) {
         if (headers[i].type != SEGMENT_LOAD or headers[i].memorySize == 0)
@@ -184,7 +193,7 @@ bool load(u8 const* data, usize size, Program& out, char const*& error) {
     }
 
     if (not mapStack(*space)) {
-        error = "out of memory for the stack";
+        error = OUT_OF_MEMORY;
         Vmm::destroyUserSpace(space);
         return false;
     }

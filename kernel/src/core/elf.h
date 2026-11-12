@@ -14,6 +14,9 @@ struct Program {
     u64 stackTop;
 };
 
+// The error load() gives when memory runs out (compare the pointer).
+inline constexpr char const OUT_OF_MEMORY[] = "out of memory";
+
 // Loads a static x86_64 ELF executable into a new user address space, with
 // a stack. On failure returns false and sets `error`; nothing is leaked.
 bool load(u8 const* data, usize size, Program& out, char const*& error);

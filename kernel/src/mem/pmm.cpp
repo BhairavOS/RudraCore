@@ -173,4 +173,10 @@ Stats stats() {
     };
 }
 
+bool userCanUse(u64 pages) {
+    constexpr u64 KERNEL_RESERVE_PAGES = 1024; // 4 MiB
+    Arch::InterruptGuard guard;
+    return freePages >= KERNEL_RESERVE_PAGES and pages <= freePages - KERNEL_RESERVE_PAGES;
+}
+
 } // namespace Rudracore::Pmm

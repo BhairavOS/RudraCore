@@ -67,7 +67,7 @@ Core::Task* startImage(char const* name, u8 const* data, usize size, Core::Objec
                        usize handleCount, Abi::Error& code, char const*& error) {
     Elf::Program program;
     if (not Elf::load(data, size, program, error)) {
-        code = Abi::INVALID_ARGUMENT;
+        code = error == Elf::OUT_OF_MEMORY ? Abi::OUT_OF_MEMORY : Abi::INVALID_ARGUMENT;
         dropHandles(handles, handleCount);
         return nullptr;
     }

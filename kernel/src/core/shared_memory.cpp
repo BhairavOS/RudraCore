@@ -15,6 +15,8 @@ SharedMemory* SharedMemory::allocate(u64 size) {
         return nullptr;
 
     u64 aligned = Mem::alignUp(size, Mem::PAGE_SIZE);
+    if (not Pmm::userCanUse(aligned / Mem::PAGE_SIZE + 1)) // + the object itself
+        return nullptr;
     u64 physical = Pmm::allocZeroed(aligned / Mem::PAGE_SIZE);
     if (not physical)
         return nullptr;

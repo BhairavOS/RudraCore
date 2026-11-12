@@ -61,7 +61,7 @@ void appPath(char const* id, char const* file, Text<96>& out) {
 bool isBuiltInProgram(char const* id) {
     static constexpr char const* BUILT_IN[] = {
         "init", "ps2", "ahci", "fs", "e1000", "rtl8139", "net", "kamalshell", "browser", "files", "terminal",
-        "notes", "monitor", "about", "store", "ipc-test", "protect-test", "fpu-test", "fs-test", "net-test",
+        "notes", "monitor", "about", "store", "ipc-test", "protect-test", "oom-test", "fpu-test", "fs-test", "net-test",
         "tls-test", "fonts", "catalog"};
     for (char const* name : BUILT_IN) {
         if (same(name, id))

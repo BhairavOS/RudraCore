@@ -35,4 +35,10 @@ void reclaimBootloaderMemory(Boot::Info const& info);
 
 Stats stats();
 
+// True if `pages` more pages may be used on a program's behalf. A reserve
+// stays free for the kernel's own allocations (objects, page tables, task
+// stacks), so a program that uses up memory gets OUT_OF_MEMORY instead of
+// making the kernel panic. Checked before anything a system call allocates.
+bool userCanUse(u64 pages);
+
 } // namespace Rudracore::Pmm

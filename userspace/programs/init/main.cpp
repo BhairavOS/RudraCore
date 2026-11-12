@@ -18,6 +18,8 @@
 #include <kapala/sys.h>
 #include <kapala/text.h>
 
+#include "config.h" // build options (Makefile)
+
 using namespace Kapala;
 
 namespace {
@@ -171,6 +173,21 @@ int main() {
     Text<> hello;
     hello.add("Bhairav OS userspace is up. I am init, task ").add(Sys::taskId());
     Sys::log(hello.cstr());
+
+#if BHAIRAV_SECURITY_TEST
+    // First, alone: it takes all free memory for a moment, so nothing else
+    // may be starting. Its channel closes when the kernel has freed it.
+    {
+        Channel mine, theirs;
+        Channel::createPair(mine, theirs);
+        Sys::Handle give[] = {theirs.handle()};
+        if (Sys::spawn("oom-test", give, 1) >= 0) {
+            theirs.release();
+            char nothing;
+            mine.recv(nothing); // returns PEER_CLOSED
+        }
+    }
+#endif
 
     Sys::spawn("protect-test");
     Sys::spawn("fpu-test"); // two at once: their floating-point
