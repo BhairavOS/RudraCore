@@ -1,6 +1,7 @@
 // net-test: checks the network at every boot.
 //
-//   handle 1: a connection to the net server
+//   handle 1: a connection to the net server (Internet access)
+//   handles 2, 3: connections with no access and local access only
 //
 // Waits for DHCP, pings the gateway, looks up a name and fetches a web page
 // over TCP. Without internet access (only the later steps need it) it says
@@ -56,6 +57,19 @@ int main() {
     if (result < 0) {
         report("DNS lookup of example.com (no internet?)", result);
         return 0;
+    }
+
+    // Access levels: handle 2 has none, handle 3 the local network only.
+    Net none, local;
+    if (none.connect(2) and local.connect(3)) {
+        unsigned ignored = 0;
+        bool levelsOk = none.status(status) == Sys::OK and
+                        none.resolve("example.com", ignored) == Sys::ACCESS_DENIED and
+                        none.ping(status.gateway) == Sys::ACCESS_DENIED and
+                        local.ping(status.gateway) >= 0 and
+                        local.tcpConnect(address, 80) == Sys::ACCESS_DENIED;
+        Sys::log(levelsOk ? "net check: access levels ok (none: status only; local: no internet)"
+                          : "net check: FAILED: an access level let through what it shouldn't");
     }
 
     start = Sys::timeMs();

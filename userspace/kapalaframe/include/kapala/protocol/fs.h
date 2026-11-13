@@ -8,6 +8,17 @@
 // serves that channel. KamalShell connects every app it starts (the app's
 // handle 2).
 //
+// The Connect message says who the client is and what it may reach, and
+// only holders of the connect channel (init and KamalShell) can send one:
+// a client can't change its own scope or name. Scopes:
+//   System   the whole disk (system services, the App Store, Terminal)
+//   User     the user's files: /apps, /var are read-only, /appdata is
+//            hidden (other apps' private storage)
+//   Private  only its own folder, /appdata/<app>, which it sees as "/"
+// /apps (installed programs), /var (system state, permissions) and
+// /appdata (apps' private storage) are the protected system directories.
+// A refused request gets ACCESS_DENIED (or NOT_FOUND for hidden paths).
+//
 //   client                                           fs
 //   Attach + shared memory (BUFFER_SIZE bytes)    ->
 //                                                 <- Reply
@@ -44,10 +55,29 @@ enum Flags : unsigned char {
     TRUNCATE = 1 << 0, // Write: empty the file first
 };
 
+enum class Scope : unsigned char {
+    System = 1,
+    User = 2,
+    Private = 3,
+};
+
+constexpr unsigned long MAX_APP_NAME = 24; // lowercase letters, digits and '-'
+
 struct Connect {
     unsigned long magic; // CONNECT_MAGIC
+    Scope scope;
+    char app[MAX_APP_NAME]; // who the client is (its private folder's name)
 };
-constexpr unsigned long CONNECT_MAGIC = 0x464C4F57; // "WOLF"
+constexpr unsigned long CONNECT_MAGIC = 0x464C4F58; // "XOLF": v2, with a scope
+
+inline Connect makeConnect(Scope scope, char const* app) {
+    Connect c{};
+    c.magic = CONNECT_MAGIC;
+    c.scope = scope;
+    for (unsigned long i = 0; app[i] and i + 1 < sizeof(c.app); i++)
+        c.app[i] = app[i];
+    return c;
+}
 
 struct Request {
     Op op;

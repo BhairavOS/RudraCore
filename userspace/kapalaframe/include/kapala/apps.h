@@ -5,13 +5,17 @@
 // An app travels as a package, a .bpk file:
 //   "BPK1", u32 file count, then per file: char name[32], u32 size, the bytes.
 // It holds:
-//   manifest.txt   lines "key = value": id, title, version, author, description
+//   manifest.txt   lines "key = value": id, title, version, author, description,
+//                  and permissions (see Permission)
 //   app.elf        the program (built against Kapalaframe, like any app)
 //   icon.png       its icon (optional; square, 64 px or more looks best)
 //
 // Installing puts those files in /apps/<id>/ on the disk; KamalShell shows
 // installed apps in the dock and the app grid and starts them like the
-// built-in ones (they get the same handles: shell, files, network).
+// built-in ones (they get the same handles: shell, files, network). What
+// those connections reach depends on the app's permissions: without any,
+// it sees only its own folder (/appdata/<id>, shown to it as "/") and no
+// network.
 //
 // A catalog bundles several packages (the App Store's shelf):
 //   "BCT1", u32 package count, u32 total size of the file, then per
@@ -21,12 +25,25 @@
 
 namespace Kapala {
 
+// What an installed app may reach beyond its own folder. The manifest asks
+// ("permissions = network files"); installing grants what it asks for (an
+// update never grants more than before); the App Store's Permissions panel
+// changes them. Kept in /var/permissions/<id>, which apps can't write.
+enum Permission : unsigned {
+    PERMISSION_LOCAL_NETWORK = 1 << 0, // "local-network": computers on the local network
+    PERMISSION_NETWORK = 1 << 1,       // "network": the internet (and the local network)
+    PERMISSION_FILES = 1 << 2,         // "files": the user's files, not just its own folder
+};
+
+constexpr char const* PERMISSIONS_DIR = "/var/permissions";
+
 struct AppInfo {
     char id[24];   // lowercase letters, digits and '-' (also its folder name)
     char title[40];
     char version[16];
     char author[40];
     char description[160];
+    unsigned permissions; // asked for in the manifest (Permission bits)
 };
 
 constexpr unsigned long MAX_APP_SIZE = 16 * 1024 * 1024;
@@ -60,7 +77,16 @@ bool parseManifest(char const* text, unsigned long length, AppInfo& out);
 long installPackage(Files& files, unsigned char const* data, unsigned long length, AppInfo& out,
                     char const*& error);
 
+// Removes the app, its private folder and its permissions.
 long uninstallApp(Files& files, char const* id);
+
+// The permissions granted to an installed app (0 if none were).
+unsigned readPermissions(Files& files, char const* id);
+
+long writePermissions(Files& files, char const* id, unsigned granted);
+
+// Permission bits from words like "network files" (unknown words are skipped).
+unsigned parsePermissions(char const* text, unsigned long length);
 
 // The installed apps (up to `capacity`); returns how many.
 long listApps(Files& files, AppInfo* out, long capacity);

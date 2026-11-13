@@ -1,6 +1,7 @@
 // fs-test: checks the disk and file system at every boot, then cleans up.
 //
-//   handle 1: a connection to the fs server
+//   handle 1: a connection to the fs server (System scope)
+//   handles 2, 3: User and Private connections, to check the scopes
 //
 // Makes a directory, writes files with short and long names, reads them
 // back, appends, writes a file bigger than one transfer, lists, removes
@@ -43,6 +44,46 @@ bool equal(char const* a, char const* b, unsigned long n) {
 }
 
 unsigned char pattern(unsigned long i) { return static_cast<unsigned char>((i * 7 + i / 251) & 0xFF); }
+
+// The scopes: handle 2 is a User connection and handle 3 a Private one,
+// both as the app "fs-test" (handle 1, `files`, is System).
+void checkScopes() {
+    Files user, mine;
+    if (not user.connect(2) or not mine.connect(3)) {
+        check(false, "connect with the User and Private scopes");
+        return;
+    }
+    char back[32] = {};
+    FileInfo info{};
+
+    // Private: its own folder is "/", and ".." can't leave it.
+    check(mine.write("/note.txt", "own", 3) == 3, "write to private storage");
+    check(files.read("/appdata/fs-test/note.txt", back, sizeof(back)) == 3, "private storage is /appdata/<app>");
+    check(mine.read("/sub/../note.txt", back, sizeof(back)) == 3, "'..' inside its folder");
+    check(mine.read("/../../appdata/fs-test/note.txt", back, sizeof(back)) == Sys::INVALID_ARGUMENT,
+          "'..' can't climb out of its folder");
+    check(mine.stat("/apps", info) == Sys::NOT_FOUND, "a private app doesn't see /apps");
+    check(mine.remove("/") == Sys::INVALID_ARGUMENT, "a private app can't remove its own folder");
+
+    // User: system directories are read-only, other apps' storage hidden.
+    check(user.write("/apps/planted.txt", "x", 1) == Sys::ACCESS_DENIED, "write into /apps");
+    check(user.makeDir("/var/planted") == Sys::ACCESS_DENIED, "make a folder in /var");
+    check(user.write("/VAR/planted.txt", "x", 1) == Sys::ACCESS_DENIED, "upper case doesn't get around it");
+    check(user.write("/tmp/../var/planted.txt", "x", 1) == Sys::ACCESS_DENIED, "'..' doesn't get around it");
+    check(user.remove("/apps") == Sys::ACCESS_DENIED, "remove /apps");
+    check(user.read("/appdata/fs-test/note.txt", back, sizeof(back)) == Sys::NOT_FOUND, "apps' storage is hidden");
+    FileEntry top[32];
+    long n = user.list("/", top, 32);
+    bool shown = false;
+    for (long i = 0; i < n; i++)
+        shown |= equal(top[i].name, "appdata", 8);
+    check(n >= 0 and not shown, "apps' storage isn't listed");
+    check(user.write("/fs-test-user.txt", "u", 1) == 1, "the user's own files are writable");
+    files.remove("/fs-test-user.txt");
+
+    files.remove("/appdata/fs-test/note.txt");
+    files.remove("/appdata/fs-test");
+}
 
 } // namespace
 
@@ -124,9 +165,11 @@ int main() {
     check(files.remove(DIR) == Sys::OK, "remove the directory");
     check(files.stat(DIR, info) == Sys::NOT_FOUND, "it's gone");
 
+    checkScopes();
+
     if (ok) {
         Text<> text;
-        text.add("fs check: create, read, append, long names, directories and remove ok; 150 KiB written in ")
+        text.add("fs check: create, read, append, long names, directories, remove and scopes ok; 150 KiB written in ")
             .add(writeMs).add(" ms, read in ").add(readMs).add(" ms");
         Sys::log(text.cstr());
     }

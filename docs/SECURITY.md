@@ -38,7 +38,7 @@ file loader.
 | Boot integrity | **None** | ShoolLoader and Limine load every module with no signature or hash. |
 | TLS server authentication | **None** | The certificate is skipped. README states this. |
 | Package integrity | **None** | BPK has no hash or signature. Repositories may be plain `http://`. |
-| App isolation from data | **None** | Every app, third-party ones included, gets a full `fs` channel (the whole disk) and a full `net` channel (`kamalshell/main.cpp` `launch`). |
+| App isolation from data | **Enforced (§9)** | Installed apps see only their own folder and no network unless the user grants more. Built-ins get fixed profiles. |
 | RNG | **Reasonable** | ChaCha20 DRBG keyed from RDRAND (when present), TSC jitter and IRQ timing. It rekeys before and after each output. There is no reseed-health check, and TSC-only seeding (no RDRAND) is weak early in boot. |
 
 Concurrency model: a single CPU. The kernel runs with interrupts disabled for
@@ -87,7 +87,7 @@ firmware↔ShoolLoader↔kernel.
 |---|---|---|---|
 | V-01 | High | **An unprivileged program can panic the kernel.** `SYS_MEMORY_ALLOC` (256 MiB per call, no limit on calls), `SYS_MEMORY_CREATE`, spawn and channel creation take physical pages with no reserve. Once RAM is gone, the next kernel `new` (for example `new Endpoint` in `channel_create`) calls `panic("heap: out of memory")`. **Reproduced:** serial log `oom check: took 246 MiB … !!! RudraCore panic: heap: out of memory`. | **Fixed, §6** |
 | V-02 | Critical | **Packages have no integrity.** BPK (`tools/bpk.cpp`) has no hash or signature, apt accepts `http://` sources, and `https://` doesn't authenticate the server. Anyone on the path can replace an app. | Open |
-| V-03 | Critical | **Apps get the whole disk and network.** `KamalShell::launch` gives every app, built-in or third-party, an unrestricted `fs` and `net` channel. One bad app can overwrite `/apps/<other>/app.elf`. | Open |
+| V-03 | Critical | **Apps get the whole disk and network.** `KamalShell::launch` gives every app, built-in or third-party, an unrestricted `fs` and `net` channel. One bad app can overwrite `/apps/<other>/app.elf`. | **Fixed, §9** |
 | V-04 | High | **TLS doesn't check the server certificate.** `tls.cpp` parses the Certificate message and drops it. There is no X.509 parsing, chain, hostname or expiry check, and no trust store. | Open (known) |
 | V-05 | Medium | **Endpoint reference cycles leak kernel memory for good.** Send endpoint `y` over its peer `x` and `y` lands in its own queue holding a reference to itself. Close `x` and `y` can never be freed. Longer cycles work too. | **Fixed, §7** |
 | V-06 | Medium | **Dead tasks' memory wasn't freed while nothing else was runnable.** Zombies were reaped only at a task switch away from a ready task. | **Fixed, §6** (reaped on each timer tick) |
@@ -131,7 +131,7 @@ replaced or read by any app.
 | P | Item | Components | Change | Depends on | Size | Validation |
 |---|---|---|---|---|---|---|
 | 0 | ✅ Kernel memory reserve | pmm, syscall, elf, shared_memory, sched | §6 | – | S | `SECURITY_TEST=1` oom-test |
-| 1 | Per-app storage isolation | kamalshell, fs | `fs` connection bound to a root (`/apps/<id>/data`); only Files and Terminal get `/`. Use a `Connect` field set by KamalShell (apps can't forge it, because the shell is the one connecting) | – | M | fs-test case: an app opening `/apps/other/app.elf` gets refused |
+| 1 | ✅ Per-app storage isolation | kamalshell, fs, net, store | §9 | – | M | fs-test, net-test |
 | 2 | Package signatures | tools/bpk, apt, apps.cpp | Ed25519 signature over the BPK. Public key in the boot image. Refuse unsigned packages. Repo index signed (anti-rollback: version must not decrease) | Ed25519 implementation + RFC 8032 test vectors | M | Tampered or unsigned `.bpk` refused; vectors in tls-test |
 | 3 | X.509 + chain + hostname + expiry | kapala/tls, new x509.cpp | DER parser, RSA-PKCS1/PSS and ECDSA-P256 verify, trust store file in the boot image, fail closed | Bignum/P-256 code | L | Bad-cert test servers (expired, wrong host, self-signed) must fail |
 | 4 | ✅ Endpoint cycle prevention | channel, syscall | §7 | – | S | harden-test |
@@ -234,3 +234,40 @@ waiter.
 - A driver could still `spawn` a boot-image program with its device; boot
   programs are trusted system code.
 - DMA itself is still unconfined without an IOMMU (threat T4 in §2).
+
+## 9. App sandbox
+
+| Item | Design | Checked by |
+|---|---|---|
+| Unforgeable identity | Identity and scope travel in the `Connect` message on the fs/net **connect** channel, which only init and KamalShell hold. An app gets only its session channel, and nothing on it changes the scope. KamalShell takes the identity from what it launches: the built-in's name, or the installed folder's id. Installs can't take a built-in's name (`isBuiltInProgram`). The Connect magic changed, so an old-format Connect is refused. | Code review. Every other check below depends on it. |
+| Per-app roots, private storage | fs scopes: **System** (whole disk), **User**, **Private** (`/appdata/<app>` shown as `/`, made on first connect). Each path is first rewritten with no `.`/`..` parts and refused if `..` would climb above `/`. This matters because the resolver follows `..` entries on the disk, so a plain prefix could be escaped. | fs-test: private write lands in `/appdata/fs-test`; `/../../…` refused; `/sub/../x` works; `/apps` invisible. |
+| Protected system directories | `/apps`, `/var`, `/appdata`. User scope: the first two read-only, `/appdata` hidden (NOT_FOUND, left out of `/` listings). Only System scope writes them. The check is on the normalised first component with the resolver's own case-insensitive compare, so case and `..` tricks name the same folder. | fs-test: writes, mkdir and remove refused, including `/VAR/…` and `/tmp/../var/…`. Files (User) doesn't list `appdata`. |
+| Network policies | net levels: **None** (Status only), **Local** (DNS; ping/TCP only to 10/8, 172.16/12, 192.168/16, 127/8, 169.254/16), **Internet**. Checked before each request. | net-test: None can't resolve or ping. Local pings the gateway but can't open TCP to example.com. |
+| Explicit hardware permissions | Kernel privilege levels: Root (init) → System (what init starts) → App (anything else, including every installed app). Apps can't call `spawn`/`spawn_image`. The kernel refuses to give an app hardware (IRQ, ports, PCI device, device memory) by spawn or by message. Drivers hold devices with only the rights from §8. | harden-test: an app's `spawn` → ACCESS_DENIED. The hardware rule is code review (no app holds hardware to try with). |
+| Process resource limits | Apps: a quarter of RAM and 256 kernel objects. System services: half and 1,024. Also 63 handles per program, 64 KiB stack, 256 MiB image. | oom-test: system service 124/248 MiB, app helpers 62 and 55 MiB, then the reserve refuses channel, memory and spawn. |
+| Permission review | Manifest `permissions = network local-network files`. Install grants what's asked; an update keeps the old grant, intersected with the new request. Grants live in `/var/permissions/<id>`. The App Store **Permissions** panel shows the request and cycles Network (Off / Local / Internet) and Your files (Off / On). Hardware shows "Never", own folder "Always". Uninstall deletes the grants and `/appdata/<id>`. | In QEMU: the panel opened for Clock, toggles saved `network` and `files` to the disk, and Clock started with `/appdata/clock`. |
+
+**Built-in profiles** (`kamalshell/main.cpp` `APPS`):
+
+| App | Files | Network |
+|---|---|---|
+| Browser | Private | Internet |
+| Files | User | None |
+| Notes | User | None |
+| Terminal | System | Internet |
+| App Store | System | Internet |
+| Monitor | Private | None |
+| About | Private | None |
+
+Terminal and the App Store need System scope because they install apps,
+which means writing `/apps` and `/var`.
+
+**Limits.**
+- Apps installed before this change have no grants file, so they start
+  with their own folder only until the user grants more.
+- Grants are per app, not per folder: `files` means all of the user's files.
+- Network policy works by address. An app with Local access can still look
+  up names, and a local proxy would relay its traffic further.
+- The shell and the servers are trusted to apply all this. A compromised
+  KamalShell could connect an app with any scope.
+- There's no CPU-time limit yet.

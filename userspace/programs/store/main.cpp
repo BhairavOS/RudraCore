@@ -6,7 +6,8 @@
 //
 // Shows every app apt can install (kapala/apt.h: the catalog that comes
 // with Bhairav OS, plus the repositories added with `apt add-repo`) and the
-// apps installed on the disk. Refresh reads the repositories again (like
+// apps installed on the disk. Each installed app's Permissions panel shows
+// what it may reach (network, the user's files) and changes it. Refresh reads the repositories again (like
 // `apt update`). At the bottom, a .bpk package can be installed from a web
 // address (http:// or https://) or from a file on the disk.
 
@@ -105,6 +106,7 @@ private:
     // MARK: Apps
 
     void reload() {
+        _review = -1;
         for (int i = 0; i < _count; i++)
             _rows[i] = Row{};
         _count = 0;
@@ -193,9 +195,62 @@ private:
         }
         _window.appsChanged();
         Text<200> t;
-        t.add(info.title).add(" is installed: it's in the dock now.");
+        t.add(info.title).add(" is installed. ");
+        describeGrants(readPermissions(_files, info.id), t);
         setStatus(t.cstr());
         reload();
+    }
+
+    // MARK: Permissions
+
+    // "It can use: the internet, your files." or "It can use only its own folder."
+    template <unsigned long N>
+    static void describeGrants(unsigned granted, Text<N>& t) {
+        if (not(granted & (PERMISSION_NETWORK | PERMISSION_LOCAL_NETWORK | PERMISSION_FILES))) {
+            t.add("It can use only its own folder.");
+            return;
+        }
+        t.add("It can use: ");
+        bool first = true;
+        auto item = [&](char const* what) {
+            t.add(first ? "" : ", ").add(what);
+            first = false;
+        };
+        if (granted & PERMISSION_NETWORK)
+            item("the internet");
+        else if (granted & PERMISSION_LOCAL_NETWORK)
+            item("the local network");
+        if (granted & PERMISSION_FILES)
+            item("your files");
+        t.add(" (see Permissions).");
+    }
+
+    void openPermissions(int index) {
+        _review = index;
+        _granted = readPermissions(_files, _rows[index].info.id);
+        redraw();
+    }
+
+    void savePermissions(unsigned granted) {
+        Row const& row = _rows[_review];
+        if (writePermissions(_files, row.info.id, granted) < 0)
+            return setStatus("Couldn't save the permissions.");
+        _granted = granted;
+        Text<200> t;
+        t.add("Saved for ").add(row.info.title).add(", from its next start. ");
+        describeGrants(granted, t);
+        setStatus(t.cstr());
+    }
+
+    // Off -> local network -> internet -> off.
+    void cycleNetwork() {
+        unsigned rest = _granted & ~(PERMISSION_NETWORK | PERMISSION_LOCAL_NETWORK);
+        if (_granted & PERMISSION_NETWORK)
+            savePermissions(rest);
+        else if (_granted & PERMISSION_LOCAL_NETWORK)
+            savePermissions(rest | PERMISSION_NETWORK);
+        else
+            savePermissions(rest | PERMISSION_LOCAL_NETWORK);
     }
 
     // Reads every repository's list again (apt update).
@@ -258,7 +313,8 @@ private:
         if (r < 0) {
             t.add("Couldn't install it: ").add(why);
         } else {
-            t.add(info.title).add(" ").add(info.version).add(" is installed.");
+            t.add(info.title).add(" ").add(info.version).add(" is installed. ");
+            describeGrants(readPermissions(_files, info.id), t);
             _window.appsChanged();
             _input[0] = '\0';
             _editing = false;
@@ -279,11 +335,32 @@ private:
     }
 
     // The buttons on a row: 0 = the main one (Install / Open / Update),
-    // 1 = Remove (installed apps only).
+    // 1 = Remove, 2 = Permissions (installed apps only).
     Rect rowButton(int i, int which) const {
         Rect r = rowRect(i);
-        int w = 92;
-        return {r.right() - 14 - w - which * (w + 8), r.y + (r.h - 30) / 2, w, 30};
+        int w = which == 2 ? 112 : 92;
+        int x = r.right() - 14 - 92 - (which >= 1 ? 92 + 8 : 0) - (which == 2 ? w + 8 : 0);
+        return {x, r.y + (r.h - 30) / 2, w, 30};
+    }
+
+    // The Permissions panel, over the list.
+    Rect panelRect() const {
+        Rect l = listArea();
+        int h = l.h - 32 < 350 ? l.h - 32 : 350;
+        return {l.x + 40, l.y + 16, l.w - 80, h};
+    }
+
+    // Its rows: 0 = network, 1 = your files, 2 = hardware, 3 = own storage.
+    int panelRowY(int which) const { return panelRect().y + 78 + which * 56; }
+
+    Rect panelToggle(int which) const {
+        Rect p = panelRect();
+        return {p.right() - 20 - 140, panelRowY(which), 140, 30};
+    }
+
+    Rect panelClose() const {
+        Rect p = panelRect();
+        return {p.right() - 20 - 94, p.bottom() - 46, 94, 32};
     }
 
     Rect refreshButton() const { return {_window.width() - 16 - 104, 16, 104, 32}; }
@@ -303,6 +380,16 @@ private:
     }
 
     void onClick(Point at) {
+        if (_review >= 0) {
+            if (panelToggle(0).contains(at))
+                cycleNetwork();
+            else if (panelToggle(1).contains(at))
+                savePermissions(_granted ^ PERMISSION_FILES);
+            else if (panelClose().contains(at) or not panelRect().contains(at))
+                _review = -1;
+            redraw();
+            return;
+        }
         if (inputRect().contains(at)) {
             _editing = true;
             _caret = true;
@@ -335,18 +422,30 @@ private:
                 remove(row);
                 return;
             }
+            if (row.installed and rowButton(i, 2).contains(at)) {
+                openPermissions(i);
+                return;
+            }
         }
         redraw();
     }
 
     void onHover(Point at) {
         int hover = -1;
-        for (int i = 0; i < _count and hover < 0; i++) {
+        for (int i = 0; i < _count and hover < 0 and _review < 0; i++) {
             if (rowButton(i, 0).contains(at))
-                hover = i * 2;
+                hover = i * 3;
             else if (_rows[i].installed and rowButton(i, 1).contains(at))
-                hover = i * 2 + 1;
+                hover = i * 3 + 1;
+            else if (_rows[i].installed and rowButton(i, 2).contains(at))
+                hover = i * 3 + 2;
         }
+        for (int k = 0; k < 2 and _review >= 0; k++) {
+            if (panelToggle(k).contains(at))
+                hover = 2000 + k;
+        }
+        if (_review >= 0 and panelClose().contains(at))
+            hover = 2002;
         if (installButton().contains(at))
             hover = 1000;
         if (refreshButton().contains(at))
@@ -453,18 +552,22 @@ private:
             if (row.offered and not same(row.package.source, Apt::BUILTIN))
                 meta.add(" · repo");
             c.text({end, r.y + 10}, meta.cstr(), Theme::TEXT_DIM);
-            Rect desc{tx, r.y + 32, rowButton(i, row.installed ? 1 : 0).x - tx - 10, r.h - 34};
+            Rect desc{tx, r.y + 32, rowButton(i, row.installed ? 2 : 0).x - tx - 10, r.h - 34};
             Rect saved = c.clip;
             c.clip = c.clip.intersect(desc);
             c.paragraph(desc, row.info.description, Theme::TEXT_DIM, 17);
             c.clip = saved;
 
             char const* main = updatable(row) ? "Update" : row.installed ? "Open" : "Install";
-            button(c, rowButton(i, 0), main, not row.installed or updatable(row), _hover == i * 2);
-            if (row.installed)
-                button(c, rowButton(i, 1), "Remove", false, _hover == i * 2 + 1);
+            button(c, rowButton(i, 0), main, not row.installed or updatable(row), _hover == i * 3);
+            if (row.installed) {
+                button(c, rowButton(i, 1), "Remove", false, _hover == i * 3 + 1);
+                button(c, rowButton(i, 2), "Permissions", false, _hover == i * 3 + 2);
+            }
         }
         c.clip = _window.surface().bounds();
+        if (_review >= 0)
+            drawPermissions(c, list);
 
         // Footer: install from an address or a file.
         Rect footer{0, h - FOOTER_H, w, FOOTER_H};
@@ -492,6 +595,59 @@ private:
         _window.present();
     }
 
+    // One line of the Permissions panel: a name, what it means, and its state.
+    void permissionRow(Canvas& c, int which, char const* name, char const* meaning, char const* state, bool changeable) {
+        Rect p = panelRect();
+        int y = panelRowY(which);
+        c.text({p.x + 20, y}, name, Theme::TEXT, Font::bold());
+        Rect text{p.x + 20, y + 20, panelToggle(which).x - p.x - 34, 34};
+        Rect saved = c.clip;
+        c.clip = c.clip.intersect(text);
+        c.paragraph(text, meaning, Theme::TEXT_DIM, 16);
+        c.clip = saved;
+        if (changeable) {
+            button(c, panelToggle(which), state, false, _hover == 2000 + which);
+        } else {
+            Font const& f = Font::system();
+            Rect t = panelToggle(which);
+            c.text({t.x + (t.w - f.measure(state)) / 2, t.y + (t.h - f.height) / 2}, state, Theme::TEXT_DIM, f);
+        }
+    }
+
+    void drawPermissions(Canvas& c, Rect list) {
+        Row const& row = _rows[_review];
+        c.fill(list, Color::hex(0x000000, 110));
+        Rect p = panelRect();
+        c.fillRounded(p, 14, Theme::SURFACE);
+        c.strokeRounded(p, 14, 1.0f, Theme::SAFFRON.withAlpha(140));
+        Text<120> title;
+        title.add("Permissions: ").add(row.info.title);
+        c.text({p.x + 20, p.y + 16}, title.cstr(), Theme::TEXT, Font::get("sans-bold", 18));
+        Text<120> asked;
+        asked.add("It asked for: ");
+        unsigned want = row.info.permissions;
+        if (not want)
+            asked.add("nothing beyond its own folder");
+        else
+            asked.add(want & PERMISSION_NETWORK ? "the internet " : "")
+                .add(want & PERMISSION_LOCAL_NETWORK ? "the local network " : "")
+                .add(want & PERMISSION_FILES ? "your files" : "");
+        c.text({p.x + 20, p.y + 44}, asked.cstr(), Theme::TEXT_DIM);
+
+        char const* network = _granted & PERMISSION_NETWORK ? "Internet"
+                              : _granted & PERMISSION_LOCAL_NETWORK ? "Local network" : "Off";
+        permissionRow(c, 0, "Network", "Local network: computers at home or work. Internet: anywhere.", network, true);
+        permissionRow(c, 1, "Your files", "On: your files too. Never other apps' data or the system.",
+                      _granted & PERMISSION_FILES ? "On" : "Off", true);
+        permissionRow(c, 2, "Hardware", "Apps never use devices directly: only Bhairav's own drivers can.", "Never", false);
+        Text<96> own;
+        own.add("/appdata/").add(row.info.id).add(", removed with the app.");
+        permissionRow(c, 3, "Its own folder", own.cstr(), "Always", false);
+
+        c.text({p.x + 20, p.bottom() - 38}, "Changes apply the next time the app starts.", Theme::TEXT_DIM);
+        button(c, panelClose(), "Done", true, _hover == 2002);
+    }
+
     Window _window;
     Files _files;
     Net _net;
@@ -500,6 +656,8 @@ private:
 
     Row _rows[MAX_ROWS];
     int _count = 0, _scroll = 0, _hover = -1;
+    int _review = -1;      // the row whose Permissions panel is open
+    unsigned _granted = 0; // its permissions
     bool _editing = false, _caret = false;
     char _input[200] = {};
     char _status[200] = {};

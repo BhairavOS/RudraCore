@@ -14,11 +14,13 @@ namespace Rudracore::Core {
 // so a refund after the task has ended still has somewhere to go.
 // Only touched with interrupts disabled (syscalls).
 struct Quota {
-    static constexpr u64 OBJECT_LIMIT = 1024;
+    static constexpr u64 OBJECT_LIMIT = 1024;     // system services
+    static constexpr u64 APP_OBJECT_LIMIT = 256;  // apps
 
     u64 limit;
     u64 used = 0;
     u64 objects = 0;
+    u64 objectLimit = OBJECT_LIMIT;
     u32 refs = 1;
 
     explicit Quota(u64 limitPages) : limit(limitPages) {}
@@ -33,7 +35,7 @@ struct Quota {
     void refund(u64 pages) { used -= pages; }
 
     bool chargeObjects(u64 n) {
-        if (n > OBJECT_LIMIT - objects)
+        if (n > objectLimit - objects)
             return false;
         objects += n;
         return true;

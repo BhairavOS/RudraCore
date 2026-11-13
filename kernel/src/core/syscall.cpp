@@ -153,6 +153,44 @@ void forgetWaits(Task* task) {
     }
 }
 
+// Hardware: devices, interrupt lines, I/O ports, and device memory (a
+// device's registers, the screen). Apps never hold any.
+bool isHardware(Object const* object) {
+    switch (object->type) {
+    case ObjectType::Irq:
+    case ObjectType::IoPorts:
+    case ObjectType::PciDevice: return true;
+    case ObjectType::Memory: return not static_cast<Core::SharedMemory const*>(object)->owned;
+    case ObjectType::Channel: return false;
+    }
+    return true;
+}
+
+// What a new program started by `parent` is: init's programs are system
+// services, everything else is an app.
+Core::Privilege childPrivilege(Task const* parent) {
+    return parent->privilege == Core::Privilege::Root ? Core::Privilege::System : Core::Privilege::App;
+}
+
+// Resource limits by privilege: an app may hold a quarter of RAM and 256
+// kernel objects; system services half and 1024 (Sched::spawnUser's defaults).
+void setPrivilege(Task* task, Core::Privilege privilege) {
+    task->privilege = privilege;
+    if (privilege == Core::Privilege::App) {
+        task->quota->limit = Pmm::stats().managedPages / 4;
+        task->quota->objectLimit = Core::Quota::APP_OBJECT_LIMIT;
+    }
+}
+
+// Before handles move to a new app: none may be hardware.
+i64 checkNoHardware(Call const& c, Abi::Handle const* handles, u64 count) {
+    for (u64 i = 0; i < count; i++) {
+        if (isHardware(c.task->handle(handles[i])->object))
+            return Abi::ACCESS_DENIED;
+    }
+    return Abi::OK;
+}
+
 // Rights a new object of each kind starts with, in the handle that made it.
 constexpr u32 CHANNEL_RIGHTS = Abi::RIGHT_READ | Abi::RIGHT_WRITE | Abi::RIGHT_TRANSFER | Abi::RIGHT_DUPLICATE |
                                Abi::RIGHT_REVOKE;
@@ -195,6 +233,8 @@ Arch::Frame* sysSpawn(Call const& c) {
     u64 handleCount = c.arg3();
 
     char name[32];
+    if (c.task->privilege == Core::Privilege::App)
+        return c.result(Abi::ACCESS_DENIED); // apps can't start programs
     if (nameLength == 0 or nameLength >= sizeof(name) or handleCount > MAX_SPAWN_HANDLES)
         return c.result(Abi::INVALID_ARGUMENT);
     if (not c.userMemory(nameAddress, nameLength) or
@@ -215,6 +255,10 @@ Arch::Frame* sysSpawn(Call const& c) {
     fromUser(handles, handlesAddress, handleCount * sizeof(Abi::Handle));
     if (i64 bad = c.checkMovable(handles, handleCount, false, Abi::NO_HANDLE))
         return c.result(bad);
+    Core::Privilege privilege = childPrivilege(c.task);
+    if (privilege == Core::Privilege::App)
+        if (i64 bad = checkNoHardware(c, handles, handleCount))
+            return c.result(bad);
 
     Core::Capability objects[MAX_SPAWN_HANDLES];
     for (u64 i = 0; i < handleCount; i++)
@@ -227,6 +271,7 @@ Arch::Frame* sysSpawn(Call const& c) {
         log("[sched] ", c.task->name, " can't start ", static_cast<char const*>(name), ": ", error);
         return c.result(code);
     }
+    setPrivilege(child, privilege);
 
     log("[sched] ", c.task->name, " started ", child->name, " as task ", child->id,
         " with ", handleCount, " handle(s)");
@@ -235,6 +280,8 @@ Arch::Frame* sysSpawn(Call const& c) {
 
 Arch::Frame* sysSpawnImage(Call const& c) {
     Abi::SpawnImage request;
+    if (c.task->privilege == Core::Privilege::App)
+        return c.result(Abi::ACCESS_DENIED);
     if (not c.userMemory(c.arg0(), sizeof(request)))
         return c.result(Abi::BAD_ADDRESS);
     fromUser(&request, c.arg0(), sizeof(request));
@@ -257,6 +304,8 @@ Arch::Frame* sysSpawnImage(Call const& c) {
     // An installed app is untrusted code: each handle needs RIGHT_TRANSFER.
     if (i64 bad = c.checkMovable(request.handles, request.handleCount, true, request.memory))
         return c.result(bad);
+    if (i64 bad = checkNoHardware(c, request.handles, request.handleCount)) // installed apps are always apps
+        return c.result(bad);
     Core::Capability objects[MAX_SPAWN_HANDLES];
     for (u64 i = 0; i < request.handleCount; i++)
         objects[i] = c.task->takeHandle(request.handles[i]);
@@ -269,6 +318,7 @@ Arch::Frame* sysSpawnImage(Call const& c) {
         log("[sched] ", c.task->name, " can't start the app ", static_cast<char const*>(request.name), ": ", why);
         return c.result(code);
     }
+    setPrivilege(child, Core::Privilege::App);
     log("[sched] ", c.task->name, " started the app ", child->name, " as task ", child->id, " with ",
         request.handleCount, " handle(s)");
     return c.result(static_cast<i64>(child->id));
@@ -538,7 +588,8 @@ Arch::Frame* sysChannelRecv(Call const& c) {
     // ask for.
     u64 received = Abi::NO_HANDLE;
     Core::Capability& attached = message.attached;
-    if (attached.object and handleOut and not attached.revoked()) {
+    bool refused = attached.object and c.task->privilege == Core::Privilege::App and isHardware(attached.object);
+    if (attached.object and handleOut and not attached.revoked() and not refused) {
         received = c.task->addHandle(attached);
         if (not received)
             return c.result(Abi::NO_SPACE);

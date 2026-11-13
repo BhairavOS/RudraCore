@@ -6,6 +6,12 @@
 // Connecting works like the file system: whoever holds the net server's
 // connect channel sends it a Connect with one end of a new channel
 // attached. KamalShell connects every app it starts (the app's handle 3).
+// The Connect sets what the client may reach, and the client can't change it:
+//   None      only Status (the computer's own address)
+//   Local     DNS, and ping / TCP to private addresses only (10/8,
+//             172.16/12, 192.168/16, 127/8, 169.254/16)
+//   Internet  everything
+// A refused request gets ACCESS_DENIED.
 //
 //   client                                          net
 //   Attach + shared memory (BUFFER_SIZE bytes)   ->
@@ -28,10 +34,27 @@ namespace Kapala::Protocol::Net {
 constexpr unsigned long BUFFER_SIZE = 64 * 1024;
 constexpr unsigned long MAX_NAME = 96;
 
+enum class Access : unsigned char {
+    None = 1,
+    Local = 2,
+    Internet = 3,
+};
+
 struct Connect {
     unsigned long magic; // CONNECT_MAGIC
+    Access access;
+    char app[24]; // who the client is (for the log)
 };
-constexpr unsigned long CONNECT_MAGIC = 0x4E455457; // "NETW"
+constexpr unsigned long CONNECT_MAGIC = 0x4E455458; // "XTEN": v2, with an access level
+
+inline Connect makeConnect(Access access, char const* app) {
+    Connect c{};
+    c.magic = CONNECT_MAGIC;
+    c.access = access;
+    for (unsigned long i = 0; app[i] and i + 1 < sizeof(c.app); i++)
+        c.app[i] = app[i];
+    return c;
+}
 
 enum class Op : unsigned char {
     Attach = 1,

@@ -152,6 +152,45 @@ void checkRevokeUnmaps(Sys::Handle elfMemory, unsigned char* file) {
     Sys::close(shared);
 }
 
+// A program started by anything but init is an app, and apps can't start
+// programs. The child tries spawn("fpu-test") and sends us the result.
+void checkAppCantSpawn(Sys::Handle elfMemory, unsigned char* file) {
+    static constexpr unsigned char SPAWNER[] = {
+        0x48, 0x8D, 0x3D, 0x32, 0x00, 0x00, 0x00, // lea rdi, [rip + 50]   (the name, below)
+        0xBE, 0x08, 0x00, 0x00, 0x00,             // mov esi, 8
+        0x31, 0xD2,                               // xor edx, edx          (no handles)
+        0x45, 0x31, 0xD2,                         // xor r10d, r10d
+        0xB8, 0x06, 0x00, 0x00, 0x00,             // mov eax, 6            (spawn)
+        0xCD, 0x80,                               // int 0x80
+        0x50,                                     // push rax              (the result)
+        0xBF, 0x01, 0x00, 0x00, 0x00,             // mov edi, 1            (handle 1)
+        0x48, 0x89, 0xE6,                         // mov rsi, rsp
+        0xBA, 0x08, 0x00, 0x00, 0x00,             // mov edx, 8
+        0x45, 0x31, 0xD2,                         // xor r10d, r10d
+        0xB8, 0x0C, 0x00, 0x00, 0x00,             // mov eax, 12           (channel_send)
+        0xCD, 0x80,                               // int 0x80
+        0xB8, 0x01, 0x00, 0x00, 0x00,             // mov eax, 1            (exit)
+        0x31, 0xFF,                               // xor edi, edi
+        0xCD, 0x80,                               // int 0x80
+        'f', 'p', 'u', '-', 't', 'e', 's', 't',
+    };
+    Sys::Handle mine, theirs;
+    Sys::channelCreate(mine, theirs);
+    Sys::Handle give[] = {theirs};
+    long child = spawnCrafted(elfMemory, file, [](Header&, Segment* s) {
+        auto* code = reinterpret_cast<unsigned char*>(s) - sizeof(Header) + CODE;
+        for (unsigned i = 0; i < sizeof(SPAWNER); i++)
+            code[i] = SPAWNER[i];
+        s[0].filesz = s[0].memsz = CODE + sizeof(SPAWNER);
+    }, give, 1);
+    long result = 0;
+    if (child >= 0 and Sys::recv(mine, &result, sizeof(result)) == sizeof(result))
+        expect("an app starting a program", result, Sys::ACCESS_DENIED);
+    else
+        expect("starting the spawner app", child, 0);
+    Sys::close(mine);
+}
+
 void checkPrograms() {
     long memory = Sys::memoryCreate(4096);
     auto* file = memory > 0 ? static_cast<unsigned char*>(Sys::memoryMap(static_cast<Sys::Handle>(memory))) : nullptr;
@@ -187,6 +226,7 @@ void checkPrograms() {
            }), Sys::INVALID_ARGUMENT);
 
     checkRevokeUnmaps(m, file);
+    checkAppCantSpawn(m, file);
 
     Sys::memoryUnmap(file);
     Sys::close(m);

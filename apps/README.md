@@ -11,7 +11,7 @@ One folder, `apps/<id>/`, with:
 | File | What it is |
 |---|---|
 | `main.cpp` (and any other `.cpp`) | The program, written against Kapalaframe (`userspace/kapalaframe/include/kapala/`) |
-| `manifest.txt` | `id`, `title`, `version`, `author` and `description`, one `key = value` per line |
+| `manifest.txt` | `id`, `title`, `version`, `author`, `description` and optionally `permissions`, one `key = value` per line |
 | `icon.png` | Optional: a square icon (128 px works well); without it the app shows its first letter |
 
 The `id` is the folder's name: lowercase letters, digits and `-`. It can't
@@ -46,6 +46,25 @@ Like every app, it starts with three handles: the shell (1), the files
 `httpGet`). It can draw, read and write files, use the network, open
 other apps (`window.launch`), and so on: see the headers and the built-in
 apps in `userspace/programs/`.
+
+What the files and network connections reach depends on the app's
+permissions. Without any, an app sees only its own folder (it's "/" to the
+app, `/appdata/<id>` on the disk, removed when the app is) and has no
+network. Ask for more in the manifest:
+
+```
+permissions = network files
+```
+
+- `network`: the internet. `local-network`: only computers on the local
+  network (10.x, 192.168.x, ...).
+- `files`: the user's files. Never other apps' folders, and `/apps` and
+  `/var` stay read-only.
+
+Installing grants what the manifest asks for; the user can change it in the
+App Store (Permissions), and an update never gains a permission by itself.
+Refused requests return `Sys::ACCESS_DENIED`. Apps can't start programs or
+use hardware, and may hold a quarter of the RAM.
 
 ## Building and installing
 
@@ -87,5 +106,6 @@ A `.bpk` is `"BPK1"`, a 32-bit file count, then per file a 32-byte name,
 a 32-bit size and the bytes (`tools/bpk.cpp` makes them; details in
 `kapala/apps.h`).
 
-**Note:** apps get the same handles as built-in apps, including the whole
-disk and the network. Install only apps you trust.
+**Note:** packages aren't signed yet, so install only apps from sources you
+trust. Permissions limit what an installed app can reach, but an app you
+granted `files` and `network` could still send your files somewhere.

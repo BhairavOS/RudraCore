@@ -56,6 +56,36 @@ void appPath(char const* id, char const* file, Text<96>& out) {
         out.add("/").add(file);
 }
 
+void permissionsPath(char const* id, Text<96>& out) {
+    out = {};
+    out.add(PERMISSIONS_DIR).add("/").add(id);
+}
+
+// Removes a directory and everything in it.
+long removeTree(Files& files, char const* path, int depth = 0) {
+    FileInfo info{};
+    long r = files.stat(path, info);
+    if (r < 0)
+        return r;
+    if (info.directory and depth < 8) {
+        static FileEntry entries[8][32]; // one batch per level
+        for (;;) {
+            long n = files.list(path, entries[depth], 32);
+            if (n <= 0)
+                break;
+            long removed = 0;
+            for (long i = 0; i < n; i++) {
+                Text<96> child;
+                child.add(path).add("/").add(entries[depth][i].name);
+                removed += removeTree(files, child.cstr(), depth + 1) >= 0;
+            }
+            if (n < 32 or removed == 0) // (stuck: don't list the same entries forever)
+                break;
+        }
+    }
+    return files.remove(path);
+}
+
 } // namespace
 
 bool isBuiltInProgram(char const* id) {
@@ -167,6 +197,8 @@ bool parseManifest(char const* text, u64 len, AppInfo& out) {
             copy(out.author, v, n, sizeof(out.author));
         else if (same(key, "description"))
             copy(out.description, v, n, sizeof(out.description));
+        else if (same(key, "permissions"))
+            out.permissions = parsePermissions(v, n);
     }
     if (not out.title[0])
         copy(out.title, out.id, length(out.id), sizeof(out.title));
@@ -185,6 +217,9 @@ long installPackage(Files& files, u8 const* data, u64 len, AppInfo& out, char co
 
     files.makeDir("/apps");
     Text<96> path;
+    appPath(out.id, "manifest.txt", path);
+    FileInfo existing{};
+    bool update = files.stat(path.cstr(), existing) == Sys::OK;
     appPath(out.id, nullptr, path);
     long r = files.makeDir(path.cstr());
     if (r < 0 and r != Sys::ALREADY_EXISTS) {
@@ -206,7 +241,63 @@ long installPackage(Files& files, u8 const* data, u64 len, AppInfo& out, char co
             return r;
         }
     }
+    // A new install gets what its manifest asks for; an update keeps what
+    // was granted and never gains a permission without the user.
+    unsigned granted = update ? readPermissions(files, out.id) & out.permissions : out.permissions;
+    if (writePermissions(files, out.id, granted) < 0) {
+        error = "couldn't save the app's permissions";
+        return Sys::IO_ERROR;
+    }
     return Sys::OK;
+}
+
+unsigned parsePermissions(char const* text, u64 len) {
+    unsigned bits = 0;
+    u64 i = 0;
+    while (i < len) {
+        while (i < len and (text[i] == ' ' or text[i] == ',' or text[i] == '\n' or text[i] == '\r' or text[i] == '\t'))
+            i++;
+        u64 start = i;
+        while (i < len and text[i] != ' ' and text[i] != ',' and text[i] != '\n' and text[i] != '\r' and text[i] != '\t')
+            i++;
+        char word[16] = {};
+        copy(word, text + start, i - start, sizeof(word));
+        if (same(word, "network"))
+            bits |= PERMISSION_NETWORK;
+        else if (same(word, "local-network"))
+            bits |= PERMISSION_LOCAL_NETWORK;
+        else if (same(word, "files"))
+            bits |= PERMISSION_FILES;
+    }
+    return bits;
+}
+
+unsigned readPermissions(Files& files, char const* id) {
+    if (not validId(id))
+        return 0;
+    Text<96> path;
+    permissionsPath(id, path);
+    char text[128];
+    long n = files.read(path.cstr(), text, sizeof(text));
+    return n > 0 ? parsePermissions(text, static_cast<u64>(n)) : 0;
+}
+
+long writePermissions(Files& files, char const* id, unsigned granted) {
+    if (not validId(id))
+        return Sys::INVALID_ARGUMENT;
+    files.makeDir("/var");
+    files.makeDir(PERMISSIONS_DIR);
+    Text<128> text;
+    if (granted & PERMISSION_NETWORK)
+        text.add("network\n");
+    if (granted & PERMISSION_LOCAL_NETWORK)
+        text.add("local-network\n");
+    if (granted & PERMISSION_FILES)
+        text.add("files\n");
+    Text<96> path;
+    permissionsPath(id, path);
+    long r = files.write(path.cstr(), text.cstr(), length(text.cstr()));
+    return r < 0 ? r : Sys::OK;
 }
 
 long uninstallApp(Files& files, char const* id) {
@@ -218,6 +309,11 @@ long uninstallApp(Files& files, char const* id) {
         appPath(id, name, path);
         files.remove(path.cstr());
     }
+    permissionsPath(id, path);
+    files.remove(path.cstr());
+    path = {};
+    path.add("/appdata/").add(id);
+    removeTree(files, path.cstr()); // its private storage
     appPath(id, nullptr, path);
     return files.remove(path.cstr());
 }

@@ -22,6 +22,18 @@ struct Mapping {
     u64 size = 0;
 };
 
+// Who a task is, which bounds what it may hold and do:
+//   Root    init (started by the kernel)
+//   System  what init starts: drivers, servers, KamalShell, boot checks
+//   App     what anything else starts: built-in and installed apps
+// Only Root and System tasks may start programs, and an App never holds
+// hardware (devices, IRQs, I/O ports, device memory).
+enum class Privilege : u8 {
+    App,
+    System,
+    Root,
+};
+
 struct Task {
     static constexpr usize MAX_HANDLES = 64;
     static constexpr usize MAX_MAPPINGS = 32;
@@ -41,6 +53,7 @@ struct Task {
 
     Vmm::Space* space = nullptr; // nullptr for kernel tasks
     Quota* quota = nullptr;      // user tasks: the memory it may hold (holds a reference)
+    Privilege privilege = Privilege::App;
     u64 wakeAt = 0;
     u64 waitDeadline = 0; // while in a timed SYS_WAIT: when it gives up (0 = none)
     i64 exitCode = 0;

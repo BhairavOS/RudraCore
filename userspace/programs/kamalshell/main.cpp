@@ -51,8 +51,18 @@ constexpr Sys::Handle SCREEN = 1;
 constexpr Sys::Handle INPUT = 2;
 constexpr Sys::Handle FILES = 3;
 constexpr Sys::Handle NETWORK = 4;
-constexpr Protocol::Fs::Connect CONNECT{Protocol::Fs::CONNECT_MAGIC};
-constexpr Protocol::Net::Connect CONNECT_NET{Protocol::Net::CONNECT_MAGIC};
+using Protocol::Fs::Scope;
+using Protocol::Net::Access;
+
+// What an app's file and network connections reach (protocol/fs.h, net.h).
+// KamalShell sets this when it connects the app; the app can't change it.
+struct Profile {
+    Scope files;
+    Access network;
+};
+
+using Protocol::Fs::makeConnect;
+using Protocol::Net::makeConnect;
 
 constexpr int MAX_WINDOWS = 16;
 constexpr int TOPBAR_H = 28;
@@ -83,11 +93,20 @@ constexpr Color CONTROL_IDLE = Color::hex(0x4A4656);
 struct AppEntry {
     char const* program;
     char const* name;
+    Profile profile;
 };
 
+// Built-in apps get exactly what they use. The App Store and Terminal
+// install apps (they write /apps and /var); Files and Notes work on the
+// user's files; the rest only have their own private folder.
 constexpr AppEntry APPS[] = {
-    {"browser", "Browser"}, {"files", "Files"},     {"terminal", "Terminal"}, {"notes", "Notes"},
-    {"monitor", "Monitor"}, {"store", "App Store"}, {"about", "About Bhairav OS"},
+    {"browser", "Browser", {Scope::Private, Access::Internet}},
+    {"files", "Files", {Scope::User, Access::None}},
+    {"terminal", "Terminal", {Scope::System, Access::Internet}},
+    {"notes", "Notes", {Scope::User, Access::None}},
+    {"monitor", "Monitor", {Scope::Private, Access::None}},
+    {"store", "App Store", {Scope::System, Access::Internet}},
+    {"about", "About Bhairav OS", {Scope::Private, Access::None}},
 };
 constexpr int APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 
@@ -195,13 +214,15 @@ public:
         // and the files (for installed apps).
         Channel mine, theirs;
         Channel::createPair(mine, theirs);
-        if (Sys::send(NETWORK, &CONNECT_NET, sizeof(CONNECT_NET), theirs.handle()) == Sys::OK) {
+        auto shellNet = makeConnect(Access::None, "kamalshell"); // the top bar only shows the address
+        if (Sys::send(NETWORK, &shellNet, sizeof(shellNet), theirs.handle()) == Sys::OK) {
             theirs.release();
             _netOk = _net.connect(mine.release());
         }
         Channel filesMine, filesTheirs;
         Channel::createPair(filesMine, filesTheirs);
-        if (Sys::send(FILES, &CONNECT, sizeof(CONNECT), filesTheirs.handle()) == Sys::OK) {
+        auto shellFiles = makeConnect(Scope::System, "kamalshell"); // reads /apps and /var/permissions
+        if (Sys::send(FILES, &shellFiles, sizeof(shellFiles), filesTheirs.handle()) == Sys::OK) {
             filesTheirs.release();
             _filesOk = _files.connect(filesMine.release());
         }
@@ -346,16 +367,34 @@ private:
         Channel mine, theirs;
         Channel::createPair(mine, theirs);
 
+        // What it may reach: a built-in's fixed profile, or what the user
+        // granted an installed app (nothing but its own folder by default).
+        Profile profile{Scope::Private, Access::None};
+        int builtIn = findBuiltIn(program);
+        if (builtIn >= 0) {
+            profile = APPS[builtIn].profile;
+        } else if (_filesOk) {
+            unsigned granted = readPermissions(_files, program);
+            if (granted & PERMISSION_FILES)
+                profile.files = Scope::User;
+            if (granted & PERMISSION_NETWORK)
+                profile.network = Access::Internet;
+            else if (granted & PERMISSION_LOCAL_NETWORK)
+                profile.network = Access::Local;
+        }
+
         // The app's own file system connection.
         Channel files, filesServer;
         Channel::createPair(files, filesServer);
-        if (Sys::send(FILES, &CONNECT, sizeof(CONNECT), filesServer.handle()) == Sys::OK)
+        auto filesHello = makeConnect(profile.files, program);
+        if (Sys::send(FILES, &filesHello, sizeof(filesHello), filesServer.handle()) == Sys::OK)
             filesServer.release(); // moved to fs
 
         // And its network connection.
         Channel net, netServer;
         Channel::createPair(net, netServer);
-        if (Sys::send(NETWORK, &CONNECT_NET, sizeof(CONNECT_NET), netServer.handle()) == Sys::OK)
+        auto netHello = makeConnect(profile.network, program);
+        if (Sys::send(NETWORK, &netHello, sizeof(netHello), netServer.handle()) == Sys::OK)
             netServer.release(); // moved to net
 
         // Built-in programs first (an installed app can't replace one).

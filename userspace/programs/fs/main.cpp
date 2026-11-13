@@ -1024,11 +1024,148 @@ void copyName(char* dest, char const* src) {
     dest[n] = '\0';
 }
 
+long makeDirectory(char const* path) {
+    Node node;
+    u32 parent;
+    char name[256];
+    long status = volume.locateNew(path, parent, name, node);
+    if (status != Sys::OK)
+        return status;
+    u32 cluster = volume.allocate(0, true);
+    if (not cluster)
+        return Sys::NO_SPACE;
+    status = volume.create(parent, name, ATTR_DIRECTORY, cluster, node);
+    if (status != Sys::OK) {
+        volume.freeChain(cluster);
+    } else {
+        // "." and ".." (0 when the parent is the root directory).
+        u64 lba = volume.sectorOf(cluster);
+        u8* sector = cache.get(lba);
+        for (int i = 0; i < 2; i++) {
+            u8* e = sector + i * 32;
+            memcpy(e, node.entry, 32);
+            memset(e, ' ', 11);
+            e[0] = '.';
+            if (i == 1)
+                e[1] = '.';
+            e[11] = ATTR_DIRECTORY;
+            e[12] = 0;
+            u32 target = i == 0 ? cluster : (parent == volume.root() ? 0 : parent);
+            put16(e + 20, static_cast<u16>(target >> 16));
+            put16(e + 26, static_cast<u16>(target));
+            put32(e + 28, 0);
+        }
+        cache.changed(lba);
+    }
+    if (not cache.flush() and status == Sys::OK)
+        status = Sys::IO_ERROR;
+    return status;
+}
+
+// MARK: Access policy
+
+// The protected system directories (top level of the disk).
+constexpr char const* APPS_DIR = "apps";       // installed programs
+constexpr char const* SYSTEM_DIR = "var";      // system state: apt, permissions
+constexpr char const* PRIVATE_DIR = "appdata"; // each app's private storage
+
 struct Client {
     Channel channel;
     u8* buffer = nullptr;
     bool used = false;
+    Fs::Scope scope = Fs::Scope::Private;
+    char root[16 + Fs::MAX_APP_NAME] = {}; // Private: "/appdata/<app>"
 };
+
+// Rewrites `path` as a plain absolute path: no empty, "." or ".." parts.
+// False if ".." would climb above "/" or the result is too long. After
+// this, the path names exactly the directories the resolver will walk (it
+// would otherwise follow the ".." entries on the disk).
+bool normalize(char const* path, char* out) {
+    if (path[0] != '/')
+        return false;
+    unsigned long n = 0;
+    char const* p = path;
+    for (;;) {
+        while (*p == '/')
+            p++;
+        if (not *p)
+            break;
+        char const* start = p;
+        while (*p and *p != '/')
+            p++;
+        unsigned long len = static_cast<unsigned long>(p - start);
+        if (len == 1 and start[0] == '.')
+            continue;
+        if (len == 2 and start[0] == '.' and start[1] == '.') {
+            if (n == 0)
+                return false;
+            while (n > 0 and out[n - 1] != '/')
+                n--;
+            n--; // the '/' too
+            continue;
+        }
+        if (n + 1 + len >= Fs::MAX_PATH)
+            return false;
+        out[n++] = '/';
+        memcpy(out + n, start, len);
+        n += len;
+    }
+    if (n == 0)
+        out[n++] = '/';
+    out[n] = '\0';
+    return true;
+}
+
+// True if the (normalized) path's first part is `dir`.
+bool under(char const* path, char const* dir) {
+    char top[256];
+    unsigned long n = 0;
+    for (char const* p = path + 1; *p and *p != '/' and n < 255; p++)
+        top[n++] = *p;
+    top[n] = '\0';
+    return sameName(top, dir);
+}
+
+// Applies the client's scope to a request's path, rewriting it to the path
+// on the disk. Returns OK, or why it's refused.
+long applyScope(Client const& client, Fs::Request& request) {
+    bool writes = request.op == Fs::Op::Write or request.op == Fs::Op::Remove or request.op == Fs::Op::MakeDir;
+    char clean[Fs::MAX_PATH];
+    if (not normalize(request.path, clean))
+        return Sys::INVALID_ARGUMENT;
+
+    switch (client.scope) {
+    case Fs::Scope::System:
+        break;
+    case Fs::Scope::User:
+        if (under(clean, PRIVATE_DIR))
+            return Sys::NOT_FOUND; // other apps' storage isn't there for it
+        if (writes and (under(clean, APPS_DIR) or under(clean, SYSTEM_DIR)))
+            return Sys::ACCESS_DENIED;
+        break;
+    case Fs::Scope::Private: {
+        if (writes and clean[1] == '\0')
+            return Sys::INVALID_ARGUMENT; // its own root stays
+        unsigned long rootLength = 0;
+        while (client.root[rootLength])
+            rootLength++;
+        unsigned long cleanLength = 0;
+        while (clean[cleanLength])
+            cleanLength++;
+        if (clean[1] == '\0')
+            cleanLength = 0; // "/" is the root itself
+        if (rootLength + cleanLength >= Fs::MAX_PATH)
+            return Sys::INVALID_ARGUMENT;
+        memcpy(request.path, client.root, rootLength);
+        memcpy(request.path + rootLength, clean, cleanLength);
+        request.path[rootLength + cleanLength] = '\0';
+        return Sys::OK;
+    }
+    }
+    memcpy(request.path, clean, Fs::MAX_PATH);
+    return Sys::OK;
+}
 
 Fs::Reply handle(Client& client, Fs::Request& request, Sys::Handle attached) {
     Fs::Reply reply{};
@@ -1054,6 +1191,12 @@ Fs::Reply handle(Client& client, Fs::Request& request, Sys::Handle attached) {
         reply.status = Sys::INVALID_ARGUMENT;
         return reply;
     }
+    if (long refused = applyScope(client, request)) {
+        reply.status = refused;
+        return reply;
+    }
+    // Listing the disk's top level for a User client: other apps' storage isn't shown.
+    bool hidePrivate = client.scope == Fs::Scope::User and request.path[1] == '\0';
 
     Node node;
     switch (request.op) {
@@ -1102,6 +1245,8 @@ Fs::Reply handle(Client& client, Fs::Request& request, Sys::Handle attached) {
         volume.walk(directory, [&](Node& entry) {
             if (sameName(entry.name, ".") or sameName(entry.name, "..") or (entry.entry[11] & ATTR_HIDDEN))
                 return false;
+            if (hidePrivate and sameName(entry.name, PRIVATE_DIR))
+                return false;
             if (index >= request.offset and reply.length < capacity) {
                 Fs::Entry& e = out[reply.length++];
                 copyName(e.name, entry.name);
@@ -1138,44 +1283,9 @@ Fs::Reply handle(Client& client, Fs::Request& request, Sys::Handle attached) {
         }
         break;
 
-    case Fs::Op::MakeDir: {
-        u32 parent;
-        char name[256];
-        reply.status = volume.locateNew(request.path, parent, name, node);
-        if (reply.status != Sys::OK)
-            break;
-        u32 cluster = volume.allocate(0, true);
-        if (not cluster) {
-            reply.status = Sys::NO_SPACE;
-            break;
-        }
-        reply.status = volume.create(parent, name, ATTR_DIRECTORY, cluster, node);
-        if (reply.status != Sys::OK) {
-            volume.freeChain(cluster);
-        } else {
-            // "." and ".." (0 when the parent is the root directory).
-            u64 lba = volume.sectorOf(cluster);
-            u8* sector = cache.get(lba);
-            for (int i = 0; i < 2; i++) {
-                u8* e = sector + i * 32;
-                memcpy(e, node.entry, 32);
-                memset(e, ' ', 11);
-                e[0] = '.';
-                if (i == 1)
-                    e[1] = '.';
-                e[11] = ATTR_DIRECTORY;
-                e[12] = 0;
-                u32 target = i == 0 ? cluster : (parent == volume.root() ? 0 : parent);
-                put16(e + 20, static_cast<u16>(target >> 16));
-                put16(e + 26, static_cast<u16>(target));
-                put32(e + 28, 0);
-            }
-            cache.changed(lba);
-        }
-        if (not cache.flush() and reply.status == Sys::OK)
-            reply.status = Sys::IO_ERROR;
+    case Fs::Op::MakeDir:
+        reply.status = makeDirectory(request.path);
         break;
-    }
 
     default: reply.status = Sys::INVALID_ARGUMENT; break;
     }
@@ -1183,6 +1293,18 @@ Fs::Reply handle(Client& client, Fs::Request& request, Sys::Handle attached) {
 }
 
 Client clients[MAX_CLIENTS];
+bool ready = false; // the disk is mounted
+
+// An app's name as its folder: lowercase letters, digits and '-'.
+bool validAppName(char const* name) {
+    if (not name[0])
+        return false;
+    for (char const* p = name; *p; p++) {
+        if (not((*p >= 'a' and *p <= 'z') or (*p >= '0' and *p <= '9') or *p == '-'))
+            return false;
+    }
+    return true;
+}
 
 // Takes a new client from the connect channel. Returns false once nobody
 // holds the other end anymore.
@@ -1197,7 +1319,11 @@ bool acceptClient(Channel& connect) {
         log("bad message on the connect channel, no longer accepting clients");
         return false;
     }
-    if (result != Sys::OK or message.magic != Fs::CONNECT_MAGIC or not attached) {
+    message.app[Fs::MAX_APP_NAME - 1] = '\0';
+    bool validScope = message.scope == Fs::Scope::System or message.scope == Fs::Scope::User or
+                      message.scope == Fs::Scope::Private;
+    if (result != Sys::OK or message.magic != Fs::CONNECT_MAGIC or not attached or not validScope or
+        not validAppName(message.app)) {
         if (attached)
             Sys::close(attached);
         return true;
@@ -1207,6 +1333,15 @@ bool acceptClient(Channel& connect) {
             client = {};
             client.channel = Channel(attached);
             client.used = true;
+            client.scope = message.scope;
+            if (message.scope == Fs::Scope::Private and ready) {
+                // Its private folder, made on first use.
+                Text<sizeof(client.root)> root;
+                root.add("/").add(PRIVATE_DIR).add("/").add(message.app);
+                memcpy(client.root, root.cstr(), sizeof(client.root));
+                makeDirectory("/appdata");
+                makeDirectory(client.root);
+            }
             return true;
         }
     }
@@ -1239,7 +1374,7 @@ void serve(Client& client) {
 
 int main() {
     Channel connect(CONNECT);
-    bool ready = disk.attach() and volume.mount();
+    ready = disk.attach() and volume.mount();
     if (not ready)
         log("no usable FAT32 disk: files are unavailable");
 

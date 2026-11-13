@@ -229,6 +229,7 @@ void startInit(Boot::Info const& info) {
     Core::Task* init = Programs::start("init", 4, caps, 7, code, error);
     if (not init)
         panic("can't start init: is init.elf in the boot image?");
+    init->privilege = Core::Privilege::Root;
     log("[core] started init as task ", init->id, " with the framebuffer, PS/2 ports, keyboard and mouse irqs",
         storage ? ", the disk controller" : "", network ? ", the network card" : "");
 }

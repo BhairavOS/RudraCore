@@ -133,16 +133,22 @@ Channel startNetwork() {
     return connect;
 }
 
-// Gives `program` a new connection (to fs or net) as its handle 1.
-template <typename ConnectMessage>
-void spawnConnected(char const* program, Channel& connect, ConnectMessage message) {
-    Channel mine, theirs;
-    Channel::createPair(mine, theirs);
-    if (connect.send(message, theirs.handle()) == Sys::OK)
-        theirs.release();
-    Sys::Handle give[] = {mine.handle()};
-    if (Sys::spawn(program, give, 1) >= 0)
-        mine.release();
+// Starts `program` with one new connection (to fs or net) per message, as
+// its handles 1, 2, 3...
+template <typename ConnectMessage, unsigned long N>
+void spawnConnected(char const* program, Channel& connect, ConnectMessage const (&messages)[N]) {
+    Sys::Handle give[N];
+    for (unsigned long i = 0; i < N; i++) {
+        Channel mine, theirs;
+        Channel::createPair(mine, theirs);
+        if (connect.send(messages[i], theirs.handle()) == Sys::OK)
+            theirs.release();
+        give[i] = mine.release();
+    }
+    if (Sys::spawn(program, give, N) < 0) {
+        for (Sys::Handle h : give)
+            Sys::close(h);
+    }
 }
 
 // Without a screen: echo typed lines to the log.
@@ -211,10 +217,21 @@ int main() {
     checkIpc();
 
     Channel files = startStorage();
-    spawnConnected("fs-test", files, Protocol::Fs::Connect{Protocol::Fs::CONNECT_MAGIC});
+    // fs-test also checks the scopes: one connection of each kind.
+    using Protocol::Fs::Scope;
+    Protocol::Fs::Connect const fsTest[] = {Protocol::Fs::makeConnect(Scope::System, "fs-test"),
+                                            Protocol::Fs::makeConnect(Scope::User, "fs-test"),
+                                            Protocol::Fs::makeConnect(Scope::Private, "fs-test")};
+    spawnConnected("fs-test", files, fsTest);
     Channel network = startNetwork();
-    spawnConnected("net-test", network, Protocol::Net::Connect{Protocol::Net::CONNECT_MAGIC});
-    spawnConnected("tls-test", network, Protocol::Net::Connect{Protocol::Net::CONNECT_MAGIC});
+    // net-test also checks the access levels: one connection of each kind.
+    using Protocol::Net::Access;
+    Protocol::Net::Connect const netTest[] = {Protocol::Net::makeConnect(Access::Internet, "net-test"),
+                                              Protocol::Net::makeConnect(Access::None, "net-test"),
+                                              Protocol::Net::makeConnect(Access::Local, "net-test")};
+    spawnConnected("net-test", network, netTest);
+    Protocol::Net::Connect const tlsTest[] = {Protocol::Net::makeConnect(Access::Internet, "tls-test")};
+    spawnConnected("tls-test", network, tlsTest);
 
     // Input: the PS/2 driver gets the controller and both IRQs, and sends
     // events to whoever holds the other end of `input`.

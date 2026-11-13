@@ -45,9 +45,30 @@ struct Client {
 
     // Sockets this client opened (closed if it goes away).
     bool owns[32] = {};
+
+    Proto::Access access = Proto::Access::None; // set when it connected
 };
 
 Client clients[MAX_CLIENTS];
+
+// Addresses that stay on the local network: 10/8, 172.16/12, 192.168/16,
+// 127/8 (this computer) and 169.254/16 (link-local).
+bool isLocal(u32 a) {
+    return (a >> 24) == 10 or (a >> 20) == 0xAC1 or (a >> 16) == 0xC0A8 or (a >> 24) == 127 or (a >> 16) == 0xA9FE;
+}
+
+// What the client's access level allows. Status is always allowed: it's
+// only this computer's own address.
+long checkAccess(Client const& c, Proto::Request const& q) {
+    if (q.op == Proto::Op::Status)
+        return Sys::OK;
+    if (c.access == Proto::Access::None)
+        return Sys::ACCESS_DENIED;
+    bool reaches = q.op == Proto::Op::Ping or q.op == Proto::Op::TcpConnect;
+    if (c.access == Proto::Access::Local and reaches and not isLocal(q.address))
+        return Sys::ACCESS_DENIED;
+    return Sys::OK;
+}
 
 void reply(Client& c, Proto::Reply const& r) {
     c.waiting = false;
@@ -165,6 +186,10 @@ void handle(Client& c, Proto::Request const& q, Sys::Handle attached) {
         replyStatus(c, Sys::INVALID_ARGUMENT);
         return;
     }
+    if (long refused = checkAccess(c, q)) {
+        replyStatus(c, refused);
+        return;
+    }
     if (not cardReady and q.op != Proto::Op::Status) {
         replyStatus(c, Sys::NETWORK_DOWN);
         return;
@@ -262,7 +287,9 @@ bool accept(Channel& connect) {
     long result = connect.recv(message, &attached, Sys::RECV_NONBLOCK);
     if (result == Sys::PEER_CLOSED or result == Sys::BUFFER_TOO_SMALL)
         return false;
-    if (result != Sys::OK or message.magic != Proto::CONNECT_MAGIC or not attached) {
+    bool validAccess = message.access == Proto::Access::None or message.access == Proto::Access::Local or
+                       message.access == Proto::Access::Internet;
+    if (result != Sys::OK or message.magic != Proto::CONNECT_MAGIC or not attached or not validAccess) {
         if (attached)
             Sys::close(attached);
         return true;
@@ -272,6 +299,7 @@ bool accept(Channel& connect) {
             c = {};
             c.channel = Channel(attached);
             c.used = true;
+            c.access = message.access;
             return true;
         }
     }
