@@ -10,6 +10,10 @@
 //   None      only Status (the computer's own address)
 //   Local     DNS, and ping / TCP to private addresses only (10/8,
 //             172.16/12, 192.168/16, 127/8, 169.254/16)
+//   Hosts     only the hosts Connect lists: DNS for those names (an entry
+//             "*.example.com" also covers its subdomains), and ping / TCP
+//             only to addresses those lookups returned. No proxy, no
+//             other computer, local or not.
 //   Internet  everything
 // A refused request gets ACCESS_DENIED.
 //
@@ -38,21 +42,28 @@ enum class Access : unsigned char {
     None = 1,
     Local = 2,
     Internet = 3,
+    Hosts = 4,
 };
+
+constexpr unsigned long MAX_HOSTS_TEXT = 88; // including the final 0
 
 struct Connect {
     unsigned long magic; // CONNECT_MAGIC
     Access access;
-    char app[24]; // who the client is (for the log)
+    char app[24];                // who the client is (for the log)
+    char hosts[MAX_HOSTS_TEXT];  // Hosts: the names, separated by spaces
 };
+static_assert(sizeof(Connect) <= 128);
 constexpr unsigned long CONNECT_MAGIC = 0x4E455458; // "XTEN": v2, with an access level
 
-inline Connect makeConnect(Access access, char const* app) {
+inline Connect makeConnect(Access access, char const* app, char const* hosts = "") {
     Connect c{};
     c.magic = CONNECT_MAGIC;
     c.access = access;
     for (unsigned long i = 0; app[i] and i + 1 < sizeof(c.app); i++)
         c.app[i] = app[i];
+    for (unsigned long i = 0; hosts[i] and i + 1 < sizeof(c.hosts); i++)
+        c.hosts[i] = hosts[i];
     return c;
 }
 

@@ -14,7 +14,9 @@
 //   System   the whole disk (system services, the App Store, Terminal)
 //   User     the user's files: /apps, /var are read-only, /appdata is
 //            hidden (other apps' private storage)
-//   Private  only its own folder, /appdata/<app>, which it sees as "/"
+//   Private  only its own folder, /appdata/<app>, which it sees as "/";
+//            plus, if Connect names a folder, that one user folder as
+//            "/shared" (never a protected directory, never "/")
 // /apps (installed programs), /var (system state, permissions) and
 // /appdata (apps' private storage) are the protected system directories.
 // A refused request gets ACCESS_DENIED (or NOT_FOUND for hidden paths).
@@ -63,19 +65,25 @@ enum class Scope : unsigned char {
 
 constexpr unsigned long MAX_APP_NAME = 24; // lowercase letters, digits and '-'
 
+constexpr unsigned long MAX_FOLDER = 64; // including the final 0
+
 struct Connect {
     unsigned long magic; // CONNECT_MAGIC
     Scope scope;
     char app[MAX_APP_NAME]; // who the client is (its private folder's name)
+    char folder[MAX_FOLDER]; // Private: a user folder it may use as /shared ("" = none)
 };
+static_assert(sizeof(Connect) <= 128);
 constexpr unsigned long CONNECT_MAGIC = 0x464C4F58; // "XOLF": v2, with a scope
 
-inline Connect makeConnect(Scope scope, char const* app) {
+inline Connect makeConnect(Scope scope, char const* app, char const* folder = "") {
     Connect c{};
     c.magic = CONNECT_MAGIC;
     c.scope = scope;
     for (unsigned long i = 0; app[i] and i + 1 < sizeof(c.app); i++)
         c.app[i] = app[i];
+    for (unsigned long i = 0; folder[i] and i + 1 < sizeof(c.folder); i++)
+        c.folder[i] = folder[i];
     return c;
 }
 

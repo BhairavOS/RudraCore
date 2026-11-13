@@ -191,6 +191,42 @@ void checkAppCantSpawn(Sys::Handle elfMemory, unsigned char* file) {
     Sys::close(mine);
 }
 
+// A spinning app must not slow a system task: system tasks run first and
+// preempt apps at the next 1 ms tick. Before that rule, a sleeper woke up
+// to 10 ms late (one app time slice). Runs once the boot's own busy checks
+// (fpu-test) are over, so they don't compete with the measurement.
+void checkAppCantHogCpu(Sys::Handle elfMemory, unsigned char* file) {
+    static constexpr unsigned char SPINNER[] = {
+        0xB8, 0x05, 0x00, 0x00, 0x00, 0xCD, 0x80, // mov eax, 5 (time); int 0x80
+        0x48, 0x8D, 0x98, 0xDC, 0x05, 0x00, 0x00, // lea rbx, [rax + 1500]
+        0xB8, 0x05, 0x00, 0x00, 0x00, 0xCD, 0x80, // spin: time
+        0x48, 0x39, 0xD8,                         // cmp rax, rbx
+        0x72, 0xF4,                               // jb spin
+        0xB8, 0x01, 0x00, 0x00, 0x00,             // mov eax, 1 (exit)
+        0x31, 0xFF, 0xCD, 0x80,                   // xor edi, edi; int 0x80
+    };
+    while (Sys::timeMs() < 9000)
+        Sys::sleep(250);
+    long child = spawnCrafted(elfMemory, file, [](Header&, Segment* s) {
+        auto* code = reinterpret_cast<unsigned char*>(s) - sizeof(Header) + CODE;
+        for (unsigned i = 0; i < sizeof(SPINNER); i++)
+            code[i] = SPINNER[i];
+        s[0].filesz = s[0].memsz = CODE + sizeof(SPINNER);
+    });
+    expect("starting the spinning app", child, 0);
+    unsigned long worst = 0;
+    for (int i = 0; i < 40; i++) {
+        unsigned long before = Sys::timeMs();
+        Sys::sleep(5);
+        unsigned long late = Sys::timeMs() - before - 5;
+        worst = late > worst ? late : worst;
+    }
+    Text<> line;
+    line.add("harden check: worst wake-up delay with a spinning app: ").add(worst).add(" ms");
+    Sys::log(line.cstr());
+    expect("a spinning app delays a system task", worst <= 2 ? 0 : -1, 0);
+}
+
 void checkPrograms() {
     long memory = Sys::memoryCreate(4096);
     auto* file = memory > 0 ? static_cast<unsigned char*>(Sys::memoryMap(static_cast<Sys::Handle>(memory))) : nullptr;
@@ -227,6 +263,7 @@ void checkPrograms() {
 
     checkRevokeUnmaps(m, file);
     checkAppCantSpawn(m, file);
+    checkAppCantHogCpu(m, file);
 
     Sys::memoryUnmap(file);
     Sys::close(m);

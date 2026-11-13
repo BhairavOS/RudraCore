@@ -221,14 +221,17 @@ int main() {
     using Protocol::Fs::Scope;
     Protocol::Fs::Connect const fsTest[] = {Protocol::Fs::makeConnect(Scope::System, "fs-test"),
                                             Protocol::Fs::makeConnect(Scope::User, "fs-test"),
-                                            Protocol::Fs::makeConnect(Scope::Private, "fs-test")};
+                                            Protocol::Fs::makeConnect(Scope::Private, "fs-test"),
+                                            Protocol::Fs::makeConnect(Scope::Private, "fs-test", "/fs-test-shared"),
+                                            Protocol::Fs::makeConnect(Scope::Private, "fs-test", "/var")};
     spawnConnected("fs-test", files, fsTest);
     Channel network = startNetwork();
     // net-test also checks the access levels: one connection of each kind.
     using Protocol::Net::Access;
     Protocol::Net::Connect const netTest[] = {Protocol::Net::makeConnect(Access::Internet, "net-test"),
                                               Protocol::Net::makeConnect(Access::None, "net-test"),
-                                              Protocol::Net::makeConnect(Access::Local, "net-test")};
+                                              Protocol::Net::makeConnect(Access::Local, "net-test"),
+                                              Protocol::Net::makeConnect(Access::Hosts, "net-test", "example.com")};
     spawnConnected("net-test", network, netTest);
     Protocol::Net::Connect const tlsTest[] = {Protocol::Net::makeConnect(Access::Internet, "tls-test")};
     spawnConnected("tls-test", network, tlsTest);

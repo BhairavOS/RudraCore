@@ -47,6 +47,13 @@ struct Client {
     bool owns[32] = {};
 
     Proto::Access access = Proto::Access::None; // set when it connected
+
+    // Access::Hosts: the names it may look up, and the addresses those
+    // lookups returned (the only ones it may reach).
+    char hosts[Proto::MAX_HOSTS_TEXT] = {};
+    u32 reachable[16] = {};
+    unsigned reachableCount = 0;
+    unsigned reachableNext = 0; // oldest entry, replaced when full
 };
 
 Client clients[MAX_CLIENTS];
@@ -57,6 +64,46 @@ bool isLocal(u32 a) {
     return (a >> 24) == 10 or (a >> 20) == 0xAC1 or (a >> 16) == 0xC0A8 or (a >> 24) == 127 or (a >> 16) == 0xA9FE;
 }
 
+char lower(char ch) { return ch >= 'A' and ch <= 'Z' ? static_cast<char>(ch + 32) : ch; }
+
+// Whether `name` is one of the client's hosts: an exact match (ignoring
+// case), or under an entry "*.example.com".
+bool hostListed(Client const& c, char const* name) {
+    char const* p = c.hosts;
+    while (*p) {
+        while (*p == ' ')
+            p++;
+        char const* entry = p;
+        while (*p and *p != ' ')
+            p++;
+        unsigned long entryLength = static_cast<unsigned long>(p - entry);
+        if (entryLength == 0)
+            break;
+        bool wildcard = entryLength > 2 and entry[0] == '*' and entry[1] == '.';
+        char const* suffix = wildcard ? entry + 1 : entry; // ".example.com" or the exact name
+        unsigned long suffixLength = wildcard ? entryLength - 1 : entryLength;
+        unsigned long nameLength = 0;
+        while (name[nameLength])
+            nameLength++;
+        if (wildcard ? nameLength > suffixLength : nameLength == suffixLength) {
+            bool match = true;
+            for (unsigned long i = 0; i < suffixLength and match; i++)
+                match = lower(name[nameLength - suffixLength + i]) == lower(suffix[i]);
+            if (match)
+                return true;
+        }
+    }
+    return false;
+}
+
+bool addressReachable(Client const& c, u32 address) {
+    for (unsigned i = 0; i < c.reachableCount; i++) {
+        if (c.reachable[i] == address)
+            return true;
+    }
+    return false;
+}
+
 // What the client's access level allows. Status is always allowed: it's
 // only this computer's own address.
 long checkAccess(Client const& c, Proto::Request const& q) {
@@ -64,6 +111,17 @@ long checkAccess(Client const& c, Proto::Request const& q) {
         return Sys::OK;
     if (c.access == Proto::Access::None)
         return Sys::ACCESS_DENIED;
+    if (c.access == Proto::Access::Hosts) {
+        char name[Proto::MAX_NAME];
+        for (unsigned long i = 0; i < Proto::MAX_NAME; i++)
+            name[i] = q.name[i];
+        name[Proto::MAX_NAME - 1] = '\0';
+        if (q.op == Proto::Op::Resolve and not hostListed(c, name))
+            return Sys::ACCESS_DENIED;
+        if ((q.op == Proto::Op::Ping or q.op == Proto::Op::TcpConnect) and not addressReachable(c, q.address))
+            return Sys::ACCESS_DENIED;
+        return Sys::OK;
+    }
     bool reaches = q.op == Proto::Op::Ping or q.op == Proto::Op::TcpConnect;
     if (c.access == Proto::Access::Local and reaches and not isLocal(q.address))
         return Sys::ACCESS_DENIED;
@@ -101,6 +159,11 @@ bool progress(Client& c) {
         }
         r.status = status;
         r.address = address;
+        // A listed host's address becomes reachable for this client.
+        if (status == Sys::OK and c.access == Proto::Access::Hosts and not addressReachable(c, address)) {
+            c.reachable[c.reachableNext++ % 16] = address;
+            c.reachableCount = c.reachableCount < 16 ? c.reachableCount + 1 : 16;
+        }
         break;
     }
     case Proto::Op::Ping: {
@@ -288,7 +351,7 @@ bool accept(Channel& connect) {
     if (result == Sys::PEER_CLOSED or result == Sys::BUFFER_TOO_SMALL)
         return false;
     bool validAccess = message.access == Proto::Access::None or message.access == Proto::Access::Local or
-                       message.access == Proto::Access::Internet;
+                       message.access == Proto::Access::Internet or message.access == Proto::Access::Hosts;
     if (result != Sys::OK or message.magic != Proto::CONNECT_MAGIC or not attached or not validAccess) {
         if (attached)
             Sys::close(attached);
@@ -300,6 +363,8 @@ bool accept(Channel& connect) {
             c.channel = Channel(attached);
             c.used = true;
             c.access = message.access;
+            for (unsigned long i = 0; i + 1 < Proto::MAX_HOSTS_TEXT; i++)
+                c.hosts[i] = message.hosts[i];
             return true;
         }
     }

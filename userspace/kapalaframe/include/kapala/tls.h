@@ -17,6 +17,7 @@
 
 #include <kapala/crypto.h>
 #include <kapala/net.h>
+#include <kapala/x509.h>
 
 namespace Kapala {
 
@@ -29,8 +30,10 @@ public:
     Tls& operator=(Tls const&) = delete;
     ~Tls();
 
-    // The handshake, over a connected TCP socket. OK, or an error
-    // (error() then describes it).
+    // The handshake, over a connected TCP socket. The server must prove it's
+    // `host`: a certificate chain to a trusted root (roots.bin) naming it,
+    // valid now, and a CertificateVerify signature from that certificate's
+    // key. OK, or an error (error() then describes it).
     long connect(Net& net, long socket, char const* host);
 
     // Sends all of it.
@@ -44,7 +47,10 @@ public:
 
     char const* cipher() const { return _cipher; }
     char const* error() const { return _error; }
-    bool verified() const { return false; } // certificates aren't checked yet
+    bool verified() const { return _verified; } // the server proved it's the host
+
+    // The certificates the server sent (until this object is destroyed).
+    X509::Chain const& chain() const { return _chain; }
 
 private:
     struct Direction {
@@ -59,6 +65,7 @@ private:
     void setKeys(Direction& d, u8 const secret[32]);
     bool decrypt(Direction& d, u8 const* header, u8* data, unsigned long& length, u8& type);
     long nextHandshake(u8& type, u8*& body, unsigned long& length);
+    long checkCertificates(u8 const* message, unsigned long length, char const* host);
 
     Net* _net = nullptr;
     long _socket = -1;
@@ -80,6 +87,9 @@ private:
 
     char const* _cipher = "";
     char const* _error = "";
+    bool _verified = false;
+    u8* _chainData = nullptr; // a copy of the Certificate message
+    X509::Chain _chain;
 };
 
 } // namespace Kapala

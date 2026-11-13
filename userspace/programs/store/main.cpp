@@ -206,7 +206,9 @@ private:
     // "It can use: the internet, your files." or "It can use only its own folder."
     template <unsigned long N>
     static void describeGrants(unsigned granted, Text<N>& t) {
-        if (not(granted & (PERMISSION_NETWORK | PERMISSION_LOCAL_NETWORK | PERMISSION_FILES))) {
+        constexpr unsigned ANY = PERMISSION_NETWORK | PERMISSION_LOCAL_NETWORK | PERMISSION_FILES | PERMISSION_FOLDER |
+                                 PERMISSION_HOSTS;
+        if (not(granted & ANY)) {
             t.add("It can use only its own folder.");
             return;
         }
@@ -220,37 +222,72 @@ private:
             item("the internet");
         else if (granted & PERMISSION_LOCAL_NETWORK)
             item("the local network");
+        else if (granted & PERMISSION_HOSTS)
+            item("its listed hosts");
         if (granted & PERMISSION_FILES)
             item("your files");
+        else if (granted & PERMISSION_FOLDER)
+            item("one of your folders");
         t.add(" (see Permissions).");
     }
 
     void openPermissions(int index) {
         _review = index;
-        _granted = readPermissions(_files, _rows[index].info.id);
+        _grants = readGrants(_files, _rows[index].info.id);
+        // Hosts it lists in its manifest can be granted later, too.
+        if (not _grants.hosts[0])
+            copy(_grants.hosts, _rows[index].info.hosts, sizeof(_grants.hosts));
+        if (not _grants.folder[0])
+            copy(_grants.folder, "/Documents", sizeof(_grants.folder));
+        _editingFolder = false;
         redraw();
     }
 
     void savePermissions(unsigned granted) {
         Row const& row = _rows[_review];
-        if (writePermissions(_files, row.info.id, granted) < 0)
+        Grants next = _grants;
+        next.permissions = granted;
+        if (writeGrants(_files, row.info.id, next) < 0)
             return setStatus("Couldn't save the permissions.");
-        _granted = granted;
+        _grants = next;
         Text<200> t;
         t.add("Saved for ").add(row.info.title).add(", from its next start. ");
         describeGrants(granted, t);
         setStatus(t.cstr());
     }
 
-    // Off -> local network -> internet -> off.
+    // Off -> its listed hosts (if it has any) -> local network -> internet -> off.
     void cycleNetwork() {
-        unsigned rest = _granted & ~(PERMISSION_NETWORK | PERMISSION_LOCAL_NETWORK);
-        if (_granted & PERMISSION_NETWORK)
+        unsigned g = _grants.permissions;
+        unsigned rest = g & ~(PERMISSION_NETWORK | PERMISSION_LOCAL_NETWORK | PERMISSION_HOSTS);
+        if (g & PERMISSION_NETWORK)
             savePermissions(rest);
-        else if (_granted & PERMISSION_LOCAL_NETWORK)
+        else if (g & PERMISSION_LOCAL_NETWORK)
             savePermissions(rest | PERMISSION_NETWORK);
-        else
+        else if ((g & PERMISSION_HOSTS) or not _grants.hosts[0])
             savePermissions(rest | PERMISSION_LOCAL_NETWORK);
+        else
+            savePermissions(rest | PERMISSION_HOSTS);
+    }
+
+    // Off -> one folder -> all your files -> off.
+    void cycleFiles() {
+        unsigned g = _grants.permissions;
+        unsigned rest = g & ~(PERMISSION_FILES | PERMISSION_FOLDER);
+        if (g & PERMISSION_FILES)
+            savePermissions(rest);
+        else if (g & PERMISSION_FOLDER)
+            savePermissions(rest | PERMISSION_FILES);
+        else
+            savePermissions(rest | PERMISSION_FOLDER);
+    }
+
+    // The folder typed in the panel: saved when Enter is pressed.
+    void saveFolder() {
+        _editingFolder = false;
+        if (_grants.folder[0] != '/')
+            return setStatus("A folder starts with /, like /Documents.");
+        savePermissions(_grants.permissions);
     }
 
     // Reads every repository's list again (apt update).
@@ -350,12 +387,13 @@ private:
         return {l.x + 40, l.y + 16, l.w - 80, h};
     }
 
-    // Its rows: 0 = network, 1 = your files, 2 = hardware, 3 = own storage.
+    // Its rows: 0 = network, 1 = your files, 2 = which folder, 3 = hardware.
     int panelRowY(int which) const { return panelRect().y + 78 + which * 56; }
 
     Rect panelToggle(int which) const {
         Rect p = panelRect();
-        return {p.right() - 20 - 140, panelRowY(which), 140, 30};
+        int w = which == 2 ? 260 : 140; // the folder box is wider
+        return {p.right() - 20 - w, panelRowY(which), w, 30};
     }
 
     Rect panelClose() const {
@@ -381,10 +419,14 @@ private:
 
     void onClick(Point at) {
         if (_review >= 0) {
+            if (_editingFolder and not panelToggle(2).contains(at))
+                saveFolder();
             if (panelToggle(0).contains(at))
                 cycleNetwork();
             else if (panelToggle(1).contains(at))
-                savePermissions(_granted ^ PERMISSION_FILES);
+                cycleFiles();
+            else if (panelToggle(2).contains(at))
+                _editingFolder = true;
             else if (panelClose().contains(at) or not panelRect().contains(at))
                 _review = -1;
             redraw();
@@ -440,12 +482,12 @@ private:
             else if (_rows[i].installed and rowButton(i, 2).contains(at))
                 hover = i * 3 + 2;
         }
-        for (int k = 0; k < 2 and _review >= 0; k++) {
+        for (int k = 0; k < 3 and _review >= 0; k++) {
             if (panelToggle(k).contains(at))
                 hover = 2000 + k;
         }
         if (_review >= 0 and panelClose().contains(at))
-            hover = 2002;
+            hover = 2010;
         if (installButton().contains(at))
             hover = 1000;
         if (refreshButton().contains(at))
@@ -457,6 +499,21 @@ private:
     }
 
     void onKey(WindowEvent const& e) {
+        if (_editingFolder) {
+            unsigned long n = length(_grants.folder);
+            if (e.character == '\n')
+                saveFolder();
+            else if (e.character == 0x1b)
+                openPermissions(_review); // back to what's saved
+            else if (e.character == '\b' and n)
+                _grants.folder[n - 1] = '\0';
+            else if (e.character >= ' ' and e.character <= '~' and n + 1 < sizeof(_grants.folder)) {
+                _grants.folder[n] = e.character;
+                _grants.folder[n + 1] = '\0';
+            }
+            redraw();
+            return;
+        }
         if (not _editing) {
             if (e.scancode == Protocol::KEY_DOWN)
                 scrollBy(40);
@@ -614,6 +671,24 @@ private:
         }
     }
 
+    // The folder row: click the box to type another folder, Enter saves.
+    void drawFolderRow(Canvas& c) {
+        Rect p = panelRect();
+        int y = panelRowY(2);
+        bool used = _grants.permissions & PERMISSION_FOLDER and not(_grants.permissions & PERMISSION_FILES);
+        c.text({p.x + 20, y}, "Which folder", used ? Theme::TEXT : Theme::TEXT_DIM, Font::bold());
+        c.text({p.x + 20, y + 20}, _editingFolder ? "Type a folder, then press Enter." : "Click the box to change it.",
+               Theme::TEXT_DIM);
+        Rect box = panelToggle(2);
+        c.fillRounded(box, 8, Theme::SURFACE_ALT);
+        if (_editingFolder or _hover == 2002)
+            c.strokeRounded(box, 8, 1.5f, Theme::SAFFRON.withAlpha(200));
+        Font const& f = Font::system();
+        int end = c.text({box.x + 10, box.y + (box.h - f.height) / 2}, _grants.folder, used ? Theme::TEXT : Theme::TEXT_DIM);
+        if (_editingFolder)
+            c.fill({end + 1, box.y + 7, 2, box.h - 14}, Theme::SAFFRON);
+    }
+
     void drawPermissions(Canvas& c, Rect list) {
         Row const& row = _rows[_review];
         c.fill(list, Color::hex(0x000000, 110));
@@ -623,29 +698,39 @@ private:
         Text<120> title;
         title.add("Permissions: ").add(row.info.title);
         c.text({p.x + 20, p.y + 16}, title.cstr(), Theme::TEXT, Font::get("sans-bold", 18));
-        Text<120> asked;
-        asked.add("It asked for: ");
+        Text<160> asked;
+        asked.add("Asked for: ");
         unsigned want = row.info.permissions;
         if (not want)
-            asked.add("nothing beyond its own folder");
+            asked.add("nothing. ");
         else
-            asked.add(want & PERMISSION_NETWORK ? "the internet " : "")
-                .add(want & PERMISSION_LOCAL_NETWORK ? "the local network " : "")
-                .add(want & PERMISSION_FILES ? "your files" : "");
+            asked.add(want & PERMISSION_NETWORK ? "internet " : "")
+                .add(want & PERMISSION_LOCAL_NETWORK ? "local network " : "")
+                .add(want & PERMISSION_HOSTS ? "its hosts " : "")
+                .add(want & PERMISSION_FILES ? "your files " : "")
+                .add(want & PERMISSION_FOLDER ? "a folder " : "")
+                .add(". ");
+        asked.add("Always: its own folder /appdata/").add(row.info.id);
         c.text({p.x + 20, p.y + 44}, asked.cstr(), Theme::TEXT_DIM);
 
-        char const* network = _granted & PERMISSION_NETWORK ? "Internet"
-                              : _granted & PERMISSION_LOCAL_NETWORK ? "Local network" : "Off";
-        permissionRow(c, 0, "Network", "Local network: computers at home or work. Internet: anywhere.", network, true);
-        permissionRow(c, 1, "Your files", "On: your files too. Never other apps' data or the system.",
-                      _granted & PERMISSION_FILES ? "On" : "Off", true);
-        permissionRow(c, 2, "Hardware", "Apps never use devices directly: only Bhairav's own drivers can.", "Never", false);
-        Text<96> own;
-        own.add("/appdata/").add(row.info.id).add(", removed with the app.");
-        permissionRow(c, 3, "Its own folder", own.cstr(), "Always", false);
+        unsigned g = _grants.permissions;
+        char const* network = g & PERMISSION_NETWORK         ? "Internet"
+                              : g & PERMISSION_LOCAL_NETWORK ? "Local network"
+                              : g & PERMISSION_HOSTS         ? "Its hosts"
+                                                             : "Off";
+        Text<140> netMeaning;
+        if (_grants.hosts[0])
+            netMeaning.add("Its hosts: ").add(_grants.hosts).add(". Or local network, or anywhere.");
+        else
+            netMeaning.add("Local network: computers at home or work. Internet: anywhere.");
+        permissionRow(c, 0, "Network", netMeaning.cstr(), network, true);
+        permissionRow(c, 1, "Your files", "One folder (below, seen by the app as /shared), or all. Never other apps' data.",
+                      g & PERMISSION_FILES ? "All" : g & PERMISSION_FOLDER ? "One folder" : "Off", true);
+        drawFolderRow(c);
+        permissionRow(c, 3, "Hardware", "Apps never use devices directly: only Bhairav's own drivers can.", "Never", false);
 
         c.text({p.x + 20, p.bottom() - 38}, "Changes apply the next time the app starts.", Theme::TEXT_DIM);
-        button(c, panelClose(), "Done", true, _hover == 2002);
+        button(c, panelClose(), "Done", true, _hover == 2010);
     }
 
     Window _window;
@@ -656,8 +741,9 @@ private:
 
     Row _rows[MAX_ROWS];
     int _count = 0, _scroll = 0, _hover = -1;
-    int _review = -1;      // the row whose Permissions panel is open
-    unsigned _granted = 0; // its permissions
+    int _review = -1;           // the row whose Permissions panel is open
+    Grants _grants;             // its permissions
+    bool _editingFolder = false; // typing in the panel's folder box
     bool _editing = false, _caret = false;
     char _input[200] = {};
     char _status[200] = {};

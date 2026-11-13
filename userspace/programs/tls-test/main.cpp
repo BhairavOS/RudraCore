@@ -3,6 +3,7 @@
 //
 //   handle 1: a connection to the net server
 
+#include <kapala/apps.h>
 #include <kapala/crypto.h>
 #include <kapala/http.h>
 #include <kapala/net.h>
@@ -89,6 +90,78 @@ void knownAnswers() {
     check("AES-128-GCM (empty)", out, "58e2fccefa7e3061367f1d57a4e7455a");
     C::aesGcmSeal(zero, gcmNonce, nullptr, 0, zero, 16, out);
     check("AES-128-GCM", out, "0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf");
+
+    // FIPS 180-4 examples
+    C::Sha512::hash("abc", 3, out);
+    check("SHA-512", out, "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+                          "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f");
+    C::Sha512 sha384(true);
+    sha384.update("abc", 3);
+    sha384.finish(out);
+    check("SHA-384", out, "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed"
+                          "8086072ba1e7cc2358baeca134c825a7");
+
+    // RFC 8032, 7.1, tests 1-3; then the same with one bit changed
+    struct Vector {
+        char const* key;
+        char const* message;
+        char const* signature;
+    };
+    static constexpr Vector ED25519[] = {
+        {"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "",
+         "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"},
+        {"3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c", "72",
+         "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"},
+        {"fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025", "af82",
+         "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a"},
+    };
+    for (Vector const& v : ED25519) {
+        unsigned char pk[32], sig[64], msg[2];
+        fromHex(v.key, pk);
+        fromHex(v.signature, sig);
+        fromHex(v.message, msg);
+        unsigned long len = 0;
+        while (v.message[2 * len])
+            len++;
+        bool good = C::ed25519Verify(sig, msg, len, pk);
+        sig[10] ^= 1;
+        bool tampered = C::ed25519Verify(sig, msg, len, pk);
+        if (not good or tampered) {
+            Sys::log(good ? "tls check: FAILED: Ed25519 accepted a changed signature"
+                          : "tls check: FAILED: Ed25519 rejected an RFC 8032 signature");
+            ok = false;
+        }
+    }
+
+    // The App Store's built-in packages are signed by a trusted key; a
+    // single changed byte must make one fail.
+    bool any = false;
+    forEachInCatalog(static_cast<unsigned char const*>(Sys::openFile("catalog")),
+                     [&](unsigned char const* data, unsigned long size) {
+        char const* why = "";
+        any = true;
+        if (not verifyPackage(data, size, why)) {
+            Text<> t;
+            t.add("tls check: FAILED: a built-in package doesn't verify: ").add(why);
+            Sys::log(t.cstr());
+            ok = false;
+            return;
+        }
+        static unsigned char copy[MAX_APP_SIZE / 8];
+        if (size > sizeof(copy))
+            return;
+        for (unsigned long i = 0; i < size; i++)
+            copy[i] = data[i];
+        copy[size / 2] ^= 1;
+        if (verifyPackage(copy, size, why)) {
+            Sys::log("tls check: FAILED: a changed package still verified");
+            ok = false;
+        }
+    });
+    if (not any) {
+        Sys::log("tls check: FAILED: no packages in the catalog to check");
+        ok = false;
+    }
 }
 
 // Fetches / over HTTPS; returns the status line's code, or a negative error.
@@ -127,8 +200,61 @@ long fetch(Net& net, char const* host, Text<200>& detail) {
     long status = 0;
     if (total > 12 and page[0] == 'H')
         status = (page[9] - '0') * 100 + (page[10] - '0') * 10 + (page[11] - '0');
-    detail.add(tls.cipher()).add(", handshake ").add(handshake).add(" ms, ").add(total).add(" bytes");
+    detail.add(tls.verified() ? "certificate verified, " : "NOT verified, ").add(tls.cipher()).add(", handshake ").add(handshake).add(" ms, ").add(total).add(" bytes");
     return status;
+}
+
+// Certificate checks that must fail: a real server under the wrong name,
+// and its real chain checked at the wrong time, against no roots, and with
+// one byte changed.
+void certificateFailures(Net& net) {
+    unsigned address;
+    if (net.resolve("example.com", address) < 0)
+        return;
+    bool good = true;
+    auto attempt = [&](char const* host, Tls& tls) {
+        long socket = net.tcpConnect(address, 443);
+        return socket >= 0 and tls.connect(net, socket, host) == Sys::OK;
+    };
+    {
+        Tls wrong;
+        if (attempt("wrong-name.invalid", wrong)) {
+            Sys::log("tls check: FAILED: a server was accepted under another site's name");
+            good = false;
+        }
+        wrong.close();
+    }
+    Tls tls;
+    if (not attempt("example.com", tls) or not tls.verified()) {
+        Sys::log("tls check: FAILED: example.com couldn't be verified for the negative checks");
+        ok = false;
+        return;
+    }
+    X509::Chain chain = tls.chain();
+    auto const* roots = static_cast<unsigned char const*>(Sys::openFile("roots"));
+    Sys::SystemInfo info{};
+    Sys::systemInfo(info);
+    unsigned char const noRoots[12] = {'B', 'C', 'T', '1', 0, 0, 0, 0, 12, 0, 0, 0};
+    static unsigned char changed[8192];
+    char const* inFuture = X509::verifyChain(chain, "example.com", 4102444800, roots); // 2100
+    char const* untrusted = X509::verifyChain(chain, "example.com", info.unixTime, noRoots);
+    char const* tampered = "too big to copy";
+    if (chain.lengths[0] <= sizeof(changed)) {
+        for (unsigned long i = 0; i < chain.lengths[0]; i++)
+            changed[i] = chain.certs[0][i];
+        changed[chain.lengths[0] - 10] ^= 1; // inside the signature
+        X509::Chain bad = chain;
+        bad.certs[0] = changed;
+        tampered = X509::verifyChain(bad, "example.com", info.unixTime, roots);
+    }
+    if (not inFuture or not untrusted or not tampered or chain.lengths[0] > sizeof(changed)) {
+        Sys::log("tls check: FAILED: an expired, untrusted or changed chain was accepted");
+        good = false;
+    }
+    tls.close();
+    if (good)
+        Sys::log("tls check: refused a wrong host name, an expired chain, unknown roots and a changed certificate");
+    ok = ok and good;
 }
 
 } // namespace
@@ -138,7 +264,7 @@ int main() {
     knownAnswers();
     if (ok) {
         Text<> t;
-        t.add("tls check: SHA-256, HKDF, X25519, ChaCha20-Poly1305 and AES-128-GCM match the test vectors (")
+        t.add("tls check: SHA-256/384/512, HKDF, X25519, Ed25519, ChaCha20-Poly1305, AES-128-GCM and package signatures check out (")
             .add(Sys::timeMs() - start).add(" ms)");
         Sys::log(t.cstr());
     }
@@ -160,6 +286,8 @@ int main() {
             t.add("failed, error ").add(status).add(" (").add(detail.cstr()).add(")");
         Sys::log(t.cstr());
     }
+
+    certificateFailures(net);
 
     // The download helper apps use (redirects, chunked bodies, TLS).
     unsigned char* body = nullptr;

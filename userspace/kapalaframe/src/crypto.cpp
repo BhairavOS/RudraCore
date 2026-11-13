@@ -169,6 +169,115 @@ void hkdfExpand(u8 const prk[32], void const* info, u64 infoLength, u8* out, u64
     }
 }
 
+// MARK: SHA-512 / SHA-384
+
+namespace {
+
+constexpr u64 K512[80] = {
+    0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc, 0x3956c25bf348b538,
+    0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118, 0xd807aa98a3030242, 0x12835b0145706fbe,
+    0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2, 0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235,
+    0xc19bf174cf692694, 0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
+    0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5, 0x983e5152ee66dfab,
+    0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4, 0xc6e00bf33da88fc2, 0xd5a79147930aa725,
+    0x06ca6351e003826f, 0x142929670a0e6e70, 0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed,
+    0x53380d139d95b3df, 0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
+    0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30, 0xd192e819d6ef5218,
+    0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8, 0x19a4c116b8d2d0c8, 0x1e376c085141ab53,
+    0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8, 0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373,
+    0x682e6ff3d6b2b8a3, 0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,
+    0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b, 0xca273eceea26619c,
+    0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178, 0x06f067aa72176fba, 0x0a637dc5a2c898a6,
+    0x113f9804bef90dae, 0x1b710b35131c471b, 0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc,
+    0x431d67c49c100d4c, 0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817,
+};
+
+u64 rotr64(u64 v, int n) { return (v >> n) | (v << (64 - n)); }
+
+u64 load64be(u8 const* p) {
+    u64 v = 0;
+    for (int i = 0; i < 8; i++)
+        v = v << 8 | p[i];
+    return v;
+}
+
+} // namespace
+
+void Sha512::reset(bool sha384) {
+    static constexpr u64 H512[8] = {0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
+                                    0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179};
+    static constexpr u64 H384[8] = {0xcbbb9d5dc1059ed8, 0x629a292a367cd507, 0x9159015a3070dd17, 0x152fecd8f70e5939,
+                                    0x67332667ffc00b31, 0x8eb44a8768581511, 0xdb0c2e0d64f98fa7, 0x47b5481dbefa4fa4};
+    for (int i = 0; i < 8; i++)
+        _state[i] = sha384 ? H384[i] : H512[i];
+    _length = 0;
+    _384 = sha384;
+}
+
+void Sha512::block(u8 const* p) {
+    u64 w[80];
+    for (int i = 0; i < 16; i++)
+        w[i] = load64be(p + 8 * i);
+    for (int i = 16; i < 80; i++) {
+        u64 s0 = rotr64(w[i - 15], 1) ^ rotr64(w[i - 15], 8) ^ (w[i - 15] >> 7);
+        u64 s1 = rotr64(w[i - 2], 19) ^ rotr64(w[i - 2], 61) ^ (w[i - 2] >> 6);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    u64 a = _state[0], b = _state[1], c = _state[2], d = _state[3];
+    u64 e = _state[4], f = _state[5], g = _state[6], h = _state[7];
+    for (int i = 0; i < 80; i++) {
+        u64 t1 = h + (rotr64(e, 14) ^ rotr64(e, 18) ^ rotr64(e, 41)) + ((e & f) ^ (~e & g)) + K512[i] + w[i];
+        u64 t2 = (rotr64(a, 28) ^ rotr64(a, 34) ^ rotr64(a, 39)) + ((a & b) ^ (a & c) ^ (b & c));
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+    }
+    _state[0] += a;
+    _state[1] += b;
+    _state[2] += c;
+    _state[3] += d;
+    _state[4] += e;
+    _state[5] += f;
+    _state[6] += g;
+    _state[7] += h;
+}
+
+void Sha512::update(void const* data, u64 length) {
+    auto const* p = static_cast<u8 const*>(data);
+    while (length) {
+        u64 used = _length % 128;
+        u64 n = 128 - used < length ? 128 - used : length;
+        memcpy(_buffer + used, p, n);
+        _length += n;
+        p += n;
+        length -= n;
+        if (_length % 128 == 0)
+            block(_buffer);
+    }
+}
+
+void Sha512::finish(u8* out) {
+    u64 bits = _length * 8;
+    u8 pad = 0x80;
+    update(&pad, 1);
+    u8 zero = 0;
+    while (_length % 128 != 112)
+        update(&zero, 1);
+    u8 size[16] = {};
+    for (int i = 0; i < 8; i++)
+        size[15 - i] = static_cast<u8>(bits >> (8 * i));
+    update(size, 16);
+    int words = _384 ? 6 : 8;
+    for (int i = 0; i < words; i++)
+        for (int j = 0; j < 8; j++)
+            out[8 * i + j] = static_cast<u8>(_state[i] >> (56 - 8 * j));
+}
+
 // MARK: X25519 (after TweetNaCl, public domain)
 
 namespace {
@@ -314,6 +423,217 @@ void x25519(u8 out[32], u8 const scalar[32], u8 const point[32]) {
 void x25519Base(u8 out[32], u8 const scalar[32]) {
     static constexpr u8 BASE[32] = {9};
     x25519(out, scalar, BASE);
+}
+
+// MARK: Ed25519 verification (after TweetNaCl, public domain)
+
+namespace {
+
+constexpr Field ED_D = {0x78a3, 0x1359, 0x4dca, 0x75eb, 0xd8ab, 0x4141, 0x0a4d, 0x0070,
+                        0xe898, 0x7779, 0x4079, 0x8cc7, 0xfe73, 0x2b6f, 0x6cee, 0x5203};
+constexpr Field ED_D2 = {0xf159, 0x26b2, 0x9b94, 0xebd6, 0xb156, 0x8283, 0x149a, 0x00e0,
+                         0xd130, 0xeef3, 0x80f2, 0x198e, 0xfce7, 0x56df, 0xd9dc, 0x2406};
+constexpr Field ED_X = {0xd51a, 0x8f25, 0x2d60, 0xc956, 0xa7b2, 0x9525, 0xc760, 0x692c,
+                        0xdc5c, 0xfdd6, 0xe231, 0xc0a4, 0x53fe, 0xcd6e, 0x36d3, 0x2169};
+constexpr Field ED_Y = {0x6658, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666,
+                        0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666};
+constexpr Field ED_I = {0xa0b0, 0x4a0e, 0x1b27, 0xc4ee, 0xe478, 0xad2f, 0x1806, 0x2f43,
+                        0xd7a7, 0x3dfb, 0x0099, 0x2b4d, 0xdf0b, 0x4fc1, 0x2480, 0x2b83};
+constexpr u64 ED_L[32] = {0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+                          0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0x10};
+
+using Point = Field[4]; // extended coordinates X, Y, Z, T
+
+void copyField(Field o, Field const a) {
+    for (int i = 0; i < 16; i++)
+        o[i] = a[i];
+}
+
+void setSmall(Field o, i64 v) {
+    for (int i = 0; i < 16; i++)
+        o[i] = 0;
+    o[0] = v;
+}
+
+bool fieldsDiffer(Field const a, Field const b) {
+    u8 x[32], y[32];
+    pack(x, a);
+    pack(y, b);
+    return not equal(x, y, 32);
+}
+
+int parity(Field const a) {
+    u8 d[32];
+    pack(d, a);
+    return d[0] & 1;
+}
+
+// a ^ ((p - 5) / 8), for the square root in decompression.
+void pow2523(Field o, Field const in) {
+    Field c;
+    copyField(c, in);
+    for (int a = 250; a >= 0; a--) {
+        square(c, c);
+        if (a != 1)
+            mul(c, c, in);
+    }
+    copyField(o, c);
+}
+
+void pointAdd(Point p, Point const q) {
+    Field a, b, c, d, t, e, f, g, h;
+    sub(a, p[1], p[0]);
+    sub(t, q[1], q[0]);
+    mul(a, a, t);
+    add(b, p[0], p[1]);
+    add(t, q[0], q[1]);
+    mul(b, b, t);
+    mul(c, p[3], q[3]);
+    mul(c, c, ED_D2);
+    mul(d, p[2], q[2]);
+    add(d, d, d);
+    sub(e, b, a);
+    sub(f, d, c);
+    add(g, d, c);
+    add(h, b, a);
+    mul(p[0], e, f);
+    mul(p[1], h, g);
+    mul(p[2], g, f);
+    mul(p[3], e, h);
+}
+
+void pointSwap(Point p, Point q, int b) {
+    for (int i = 0; i < 4; i++)
+        select(p[i], q[i], b);
+}
+
+void pointPack(u8 out[32], Point const p) {
+    Field zi, tx, ty;
+    invert(zi, p[2]);
+    mul(tx, p[0], zi);
+    mul(ty, p[1], zi);
+    pack(out, ty);
+    out[31] ^= static_cast<u8>(parity(tx) << 7);
+}
+
+void scalarMultiply(Point p, Point q, u8 const* s) {
+    setSmall(p[0], 0);
+    setSmall(p[1], 1);
+    setSmall(p[2], 1);
+    setSmall(p[3], 0);
+    for (int i = 255; i >= 0; --i) {
+        int b = (s[i / 8] >> (i & 7)) & 1;
+        pointSwap(p, q, b);
+        pointAdd(q, p);
+        pointAdd(p, p);
+        pointSwap(p, q, b);
+    }
+}
+
+void scalarBase(Point p, u8 const* s) {
+    Point q;
+    copyField(q[0], ED_X);
+    copyField(q[1], ED_Y);
+    setSmall(q[2], 1);
+    mul(q[3], ED_X, ED_Y);
+    scalarMultiply(p, q, s);
+}
+
+// r = x mod L (x: 64 limbs of one byte each).
+void modL(u8* r, i64 x[64]) {
+    for (int i = 63; i >= 32; --i) {
+        i64 c = 0;
+        int j;
+        for (j = i - 32; j < i - 12; ++j) {
+            x[j] += c - 16 * x[i] * static_cast<i64>(ED_L[j - (i - 32)]);
+            c = (x[j] + 128) >> 8;
+            x[j] -= c * 256;
+        }
+        x[j] += c;
+        x[i] = 0;
+    }
+    i64 c = 0;
+    for (int j = 0; j < 32; j++) {
+        x[j] += c - (x[31] >> 4) * static_cast<i64>(ED_L[j]);
+        c = x[j] >> 8;
+        x[j] &= 255;
+    }
+    for (int j = 0; j < 32; j++)
+        x[j] -= c * static_cast<i64>(ED_L[j]);
+    for (int i = 0; i < 32; i++) {
+        x[i + 1] += x[i] >> 8;
+        r[i] = static_cast<u8>(x[i] & 255);
+    }
+}
+
+// Decompresses a public key into -A (negated, as verification needs).
+bool unpackNegated(Point r, u8 const p[32]) {
+    Field t, chk, num, den, den2, den4, den6;
+    setSmall(r[2], 1);
+    unpack(r[1], p);
+    square(num, r[1]);
+    mul(den, num, ED_D);
+    sub(num, num, r[2]);
+    add(den, r[2], den);
+    square(den2, den);
+    square(den4, den2);
+    mul(den6, den4, den2);
+    mul(t, den6, num);
+    mul(t, t, den);
+    pow2523(t, t);
+    mul(t, t, num);
+    mul(t, t, den);
+    mul(t, t, den);
+    mul(r[0], t, den);
+    square(chk, r[0]);
+    mul(chk, chk, den);
+    if (fieldsDiffer(chk, num))
+        mul(r[0], r[0], ED_I);
+    square(chk, r[0]);
+    mul(chk, chk, den);
+    if (fieldsDiffer(chk, num))
+        return false; // not a point on the curve
+    if (parity(r[0]) == (p[31] >> 7)) {
+        Field zero = {};
+        sub(r[0], zero, r[0]);
+    }
+    mul(r[3], r[0], r[1]);
+    return true;
+}
+
+} // namespace
+
+bool ed25519Verify(u8 const signature[64], void const* message, u64 length, u8 const publicKey[32]) {
+    // S must be below L (RFC 8032 5.1.7): reject the malleable forms.
+    for (int i = 31; i >= 0; i--) {
+        if (signature[32 + i] < ED_L[i])
+            break;
+        if (signature[32 + i] > ED_L[i] or i == 0)
+            return false;
+    }
+    Point a;
+    if (not unpackNegated(a, publicKey))
+        return false;
+
+    Sha512 h;
+    h.update(signature, 32);
+    h.update(publicKey, 32);
+    h.update(message, length);
+    u8 k[64];
+    h.finish(k);
+    i64 wide[64];
+    for (int i = 0; i < 64; i++)
+        wide[i] = k[i];
+    u8 reduced[32];
+    modL(reduced, wide);
+
+    Point p, q;
+    scalarMultiply(p, a, reduced); // k * (-A)
+    scalarBase(q, signature + 32); // S * B
+    pointAdd(p, q);
+    u8 r[32];
+    pointPack(r, p);
+    return equal(r, signature, 32); // R == S*B - k*A
 }
 
 // MARK: ChaCha20 and Poly1305

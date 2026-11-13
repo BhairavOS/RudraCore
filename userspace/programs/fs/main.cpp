@@ -1075,6 +1075,7 @@ struct Client {
     bool used = false;
     Fs::Scope scope = Fs::Scope::Private;
     char root[16 + Fs::MAX_APP_NAME] = {}; // Private: "/appdata/<app>"
+    char folder[Fs::MAX_FOLDER] = {};      // Private: the user folder it sees as /shared, or ""
 };
 
 // Rewrites `path` as a plain absolute path: no empty, "." or ".." parts.
@@ -1147,19 +1148,28 @@ long applyScope(Client const& client, Fs::Request& request) {
     case Fs::Scope::Private: {
         if (writes and clean[1] == '\0')
             return Sys::INVALID_ARGUMENT; // its own root stays
-        unsigned long rootLength = 0;
-        while (client.root[rootLength])
-            rootLength++;
-        unsigned long cleanLength = 0;
-        while (clean[cleanLength])
-            cleanLength++;
-        if (clean[1] == '\0')
-            cleanLength = 0; // "/" is the root itself
-        if (rootLength + cleanLength >= Fs::MAX_PATH)
+        // "/shared/..." is the user folder it was given, if any.
+        char const* base = client.root;
+        char const* rest = clean;
+        if (client.folder[0] and under(clean, "shared")) {
+            if (writes and clean[7] == '\0')
+                return Sys::INVALID_ARGUMENT; // the folder itself stays
+            base = client.folder;
+            rest = clean + 7; // what follows "/shared" ("" or "/...")
+        }
+        unsigned long baseLength = 0;
+        while (base[baseLength])
+            baseLength++;
+        unsigned long restLength = 0;
+        while (rest[restLength])
+            restLength++;
+        if (rest[0] == '/' and rest[1] == '\0')
+            restLength = 0; // "/" is the base itself
+        if (baseLength + restLength >= Fs::MAX_PATH)
             return Sys::INVALID_ARGUMENT;
-        memcpy(request.path, client.root, rootLength);
-        memcpy(request.path + rootLength, clean, cleanLength);
-        request.path[rootLength + cleanLength] = '\0';
+        memcpy(request.path, base, baseLength);
+        memcpy(request.path + baseLength, rest, restLength);
+        request.path[baseLength + restLength] = '\0';
         return Sys::OK;
     }
     }
@@ -1295,6 +1305,38 @@ Fs::Reply handle(Client& client, Fs::Request& request, Sys::Handle attached) {
 Client clients[MAX_CLIENTS];
 bool ready = false; // the disk is mounted
 
+// A user folder given to a Private client: normalized into `out`, never
+// "/" (that's every file: the User scope) or a protected directory.
+bool validFolder(Fs::Scope scope, char const* folder, char* out) {
+    char clean[Fs::MAX_PATH];
+    if (scope != Fs::Scope::Private or not normalize(folder, clean) or clean[1] == '\0')
+        return false;
+    if (under(clean, APPS_DIR) or under(clean, SYSTEM_DIR) or under(clean, PRIVATE_DIR))
+        return false;
+    unsigned long n = 0;
+    while (clean[n])
+        n++;
+    if (n >= Fs::MAX_FOLDER)
+        return false;
+    memcpy(out, clean, n + 1);
+    return true;
+}
+
+// Makes a directory and any missing parents (the path is normalized).
+void makePath(char const* path) {
+    char partial[Fs::MAX_PATH];
+    unsigned long n = 0;
+    for (unsigned long i = 0; path[i]; i++) {
+        if (path[i] == '/' and i > 0) {
+            partial[n] = '\0';
+            makeDirectory(partial);
+        }
+        partial[n++] = path[i];
+    }
+    partial[n] = '\0';
+    makeDirectory(partial);
+}
+
 // An app's name as its folder: lowercase letters, digits and '-'.
 bool validAppName(char const* name) {
     if (not name[0])
@@ -1322,6 +1364,10 @@ bool acceptClient(Channel& connect) {
     message.app[Fs::MAX_APP_NAME - 1] = '\0';
     bool validScope = message.scope == Fs::Scope::System or message.scope == Fs::Scope::User or
                       message.scope == Fs::Scope::Private;
+    message.folder[Fs::MAX_FOLDER - 1] = '\0';
+    char folder[Fs::MAX_FOLDER] = {};
+    if (message.folder[0] and not validFolder(message.scope, message.folder, folder))
+        result = Sys::INVALID_ARGUMENT; // refuse the connection
     if (result != Sys::OK or message.magic != Fs::CONNECT_MAGIC or not attached or not validScope or
         not validAppName(message.app)) {
         if (attached)
@@ -1341,6 +1387,10 @@ bool acceptClient(Channel& connect) {
                 memcpy(client.root, root.cstr(), sizeof(client.root));
                 makeDirectory("/appdata");
                 makeDirectory(client.root);
+                if (folder[0]) {
+                    memcpy(client.folder, folder, sizeof(folder));
+                    makePath(folder);
+                }
             }
             return true;
         }

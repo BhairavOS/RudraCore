@@ -1,5 +1,7 @@
 #include <kapala/tls.h>
 
+#include <kapala/sys.h>
+
 extern "C" {
 void* memcpy(void* dest, void const* src, unsigned long n);
 void* memmove(void* dest, void const* src, unsigned long n);
@@ -104,6 +106,7 @@ Tls::~Tls() {
     delete[] _in;
     delete[] _plain;
     delete[] _handshake;
+    delete[] _chainData;
 }
 
 long Tls::fail(char const* why, long code) {
@@ -415,7 +418,31 @@ long Tls::connect(Net& net, long socket, char const* host) {
         r = nextHandshake(type, message, length);
         if (r < 0)
             return r;
+        if (type == CERTIFICATE) {
+            if (long bad = checkCertificates(message, length, host))
+                return bad;
+        } else if (type == CERTIFICATE_VERIFY) {
+            // Signed: 64 spaces, a label, 0, and the transcript hash so far.
+            transcript.peek(hash);
+            static constexpr char LABEL[] = "TLS 1.3, server CertificateVerify";
+            u8 content[64 + sizeof(LABEL) + 32];
+            for (int i = 0; i < 64; i++)
+                content[i] = ' ';
+            for (unsigned long i = 0; i < sizeof(LABEL); i++)
+                content[64 + i] = static_cast<u8>(LABEL[i]); // the final 0 included
+            for (int i = 0; i < 32; i++)
+                content[64 + sizeof(LABEL) + i] = hash[i];
+            if (_chain.count == 0 or length < 8 or 8 + get16(message + 6) != length)
+                return fail("the server's CertificateVerify is malformed", Sys::INVALID_ARGUMENT);
+            if (char const* why = X509::verifyHandshakeSignature(_chain.certs[0], _chain.lengths[0], get16(message + 4),
+                                                                 message + 8, get16(message + 6), content,
+                                                                 sizeof(content)))
+                return fail(why, Sys::ACCESS_DENIED);
+            _verified = true;
+        }
         if (type == FINISHED) {
+            if (not _verified)
+                return fail("the server didn't prove who it is (no certificate)", Sys::ACCESS_DENIED);
             u8 finishedKey[32], expected[32];
             expandLabel(serverHs, "finished", nullptr, 0, finishedKey, 32);
             transcript.peek(hash);
@@ -462,6 +489,49 @@ long Tls::connect(Net& net, long socket, char const* host) {
     C::wipe(clientAp, 32);
     C::wipe(clientHs, 32);
     C::wipe(serverHs, 32);
+    return Sys::OK;
+}
+
+// Copies the server's certificates out of its Certificate message (the
+// handshake buffer is reused) and checks them against `host`.
+long Tls::checkCertificates(u8 const* message, u64 length, char const* host) {
+    delete[] _chainData;
+    _chainData = new u8[length];
+    if (not _chainData)
+        return fail("out of memory", Sys::OUT_OF_MEMORY);
+    for (u64 i = 0; i < length; i++)
+        _chainData[i] = message[i];
+    u8 const* p = _chainData + 4;
+    u8 const* end = _chainData + length;
+    if (p >= end or p + 1 + p[0] + 3 > end)
+        return fail("the server's Certificate message is malformed", Sys::INVALID_ARGUMENT);
+    p += 1 + p[0]; // request context
+    u8 const* listEnd = p + 3 + get24(p);
+    p += 3;
+    if (listEnd != end)
+        return fail("the server's Certificate message is malformed", Sys::INVALID_ARGUMENT);
+    _chain.count = 0;
+    while (p < listEnd) {
+        if (p + 3 > listEnd)
+            return fail("the server's Certificate message is malformed", Sys::INVALID_ARGUMENT);
+        u64 n = get24(p);
+        p += 3;
+        if (p + n + 2 > listEnd)
+            return fail("the server's Certificate message is malformed", Sys::INVALID_ARGUMENT);
+        if (_chain.count < X509::MAX_CHAIN) {
+            _chain.certs[_chain.count] = p;
+            _chain.lengths[_chain.count++] = n;
+        }
+        p += n;
+        p += 2 + get16(p); // extensions
+    }
+    Sys::SystemInfo info{};
+    Sys::systemInfo(info);
+    static auto const* roots = static_cast<u8 const*>(Sys::openFile("roots"));
+    if (not roots)
+        return fail("this system has no trusted roots (roots.bin)", Sys::NOT_FOUND);
+    if (char const* why = X509::verifyChain(_chain, host, info.unixTime, roots))
+        return fail(why, Sys::ACCESS_DENIED);
     return Sys::OK;
 }
 

@@ -1,4 +1,6 @@
 #include <kapala/apps.h>
+#include <kapala/apt.h>
+#include <kapala/crypto.h>
 #include <kapala/text.h>
 
 extern "C" {
@@ -92,7 +94,7 @@ bool isBuiltInProgram(char const* id) {
     static constexpr char const* BUILT_IN[] = {
         "init", "ps2", "ahci", "fs", "e1000", "rtl8139", "net", "kamalshell", "browser", "files", "terminal",
         "notes", "monitor", "about", "store", "ipc-test", "protect-test", "oom-test", "harden-test", "fpu-test", "fs-test", "net-test",
-        "tls-test", "fonts", "catalog"};
+        "tls-test", "fonts", "catalog", "trust", "roots"};
     for (char const* name : BUILT_IN) {
         if (same(name, id))
             return true;
@@ -198,20 +200,62 @@ bool parseManifest(char const* text, u64 len, AppInfo& out) {
         else if (same(key, "description"))
             copy(out.description, v, n, sizeof(out.description));
         else if (same(key, "permissions"))
-            out.permissions = parsePermissions(v, n);
+            out.permissions |= parsePermissions(v, n);
+        else if (same(key, "hosts")) {
+            copy(out.hosts, v, n, sizeof(out.hosts));
+            if (out.hosts[0])
+                out.permissions |= PERMISSION_HOSTS; // listing hosts asks for them
+        }
     }
     if (not out.title[0])
         copy(out.title, out.id, length(out.id), sizeof(out.title));
     return out.id[0] != '\0';
 }
 
+bool verifyPackage(u8 const* data, u64 len, char const*& error) {
+    Package package;
+    if (not package.parse(data, len, error))
+        return false;
+    // The last file must be the signature, covering everything before its entry.
+    unsigned count = read32(data + 4);
+    u64 at = 8, last = 0;
+    for (unsigned i = 0; i < count; i++) {
+        last = at;
+        at += 36 + read32(data + at + 32);
+    }
+    if (count < 2 or memcmp(data + last, "signature", 10) != 0 or read32(data + last + 32) != 64 or at != len) {
+        error = "the package isn't signed";
+        return false;
+    }
+    static auto const* trust = static_cast<u8 const*>(Sys::openFile("trust"));
+    if (not trust or memcmp(trust, "BTK1", 4) != 0) {
+        error = "this system has no trusted publisher keys (trust.bin)";
+        return false;
+    }
+    unsigned keys = read32(trust + 4);
+    for (unsigned k = 0; k < keys and k < 16; k++) {
+        if (Crypto::ed25519Verify(data + last + 36, data, last, trust + 8 + 32 * k))
+            return true;
+    }
+    error = "the package isn't signed by a trusted publisher (or was changed)";
+    return false;
+}
+
 long installPackage(Files& files, u8 const* data, u64 len, AppInfo& out, char const*& error) {
+    if (not verifyPackage(data, len, error))
+        return Sys::ACCESS_DENIED;
     Package package;
     if (not package.parse(data, len, error))
         return Sys::INVALID_ARGUMENT;
     out = package.info();
     if (isBuiltInProgram(out.id)) {
         error = "that name belongs to a built-in program";
+        return Sys::ALREADY_EXISTS;
+    }
+    // No rollback: an older (signed) version could bring back a fixed hole.
+    AppInfo installed{};
+    if (readAppInfo(files, out.id, installed) == Sys::OK and Apt::compareVersions(out.version, installed.version) < 0) {
+        error = "it's older than the installed version";
         return Sys::ALREADY_EXISTS;
     }
 
@@ -242,9 +286,18 @@ long installPackage(Files& files, u8 const* data, u64 len, AppInfo& out, char co
         }
     }
     // A new install gets what its manifest asks for; an update keeps what
-    // was granted and never gains a permission without the user.
-    unsigned granted = update ? readPermissions(files, out.id) & out.permissions : out.permissions;
-    if (writePermissions(files, out.id, granted) < 0) {
+    // was granted (folder and hosts too) and never gains a permission
+    // without the user.
+    Grants grants;
+    if (update) {
+        grants = readGrants(files, out.id);
+        grants.permissions &= out.permissions;
+    } else {
+        grants.permissions = out.permissions;
+        copy(grants.hosts, out.hosts, length(out.hosts), sizeof(grants.hosts));
+        copy(grants.folder, "/Documents", 10, sizeof(grants.folder));
+    }
+    if (writeGrants(files, out.id, grants) < 0) {
         error = "couldn't save the app's permissions";
         return Sys::IO_ERROR;
     }
@@ -268,36 +321,83 @@ unsigned parsePermissions(char const* text, u64 len) {
             bits |= PERMISSION_LOCAL_NETWORK;
         else if (same(word, "files"))
             bits |= PERMISSION_FILES;
+        else if (same(word, "folder"))
+            bits |= PERMISSION_FOLDER;
+        else if (same(word, "hosts"))
+            bits |= PERMISSION_HOSTS;
     }
     return bits;
 }
 
-unsigned readPermissions(Files& files, char const* id) {
+// The file: one permission word per line, then "folder = /path" and
+// "hosts = a b" lines.
+Grants readGrants(Files& files, char const* id) {
+    Grants grants;
     if (not validId(id))
-        return 0;
+        return grants;
     Text<96> path;
     permissionsPath(id, path);
-    char text[128];
-    long n = files.read(path.cstr(), text, sizeof(text));
-    return n > 0 ? parsePermissions(text, static_cast<u64>(n)) : 0;
+    char text[320];
+    long n = files.read(path.cstr(), text, sizeof(text) - 1);
+    if (n <= 0)
+        return grants;
+    u64 i = 0, len = static_cast<u64>(n);
+    while (i < len) {
+        u64 start = i;
+        while (i < len and text[i] != '\n')
+            i++;
+        u64 end = i++;
+        u64 eq = start;
+        while (eq < end and text[eq] != '=')
+            eq++;
+        if (eq == end) {
+            grants.permissions |= parsePermissions(text + start, end - start);
+            continue;
+        }
+        u64 vs = eq + 1;
+        while (vs < end and text[vs] == ' ')
+            vs++;
+        if (end - start > 6 and memcmp(text + start, "folder", 6) == 0)
+            copy(grants.folder, text + vs, end - vs, sizeof(grants.folder));
+        else if (end - start > 5 and memcmp(text + start, "hosts", 5) == 0)
+            copy(grants.hosts, text + vs, end - vs, sizeof(grants.hosts));
+    }
+    return grants;
 }
 
-long writePermissions(Files& files, char const* id, unsigned granted) {
+long writeGrants(Files& files, char const* id, Grants const& grants) {
     if (not validId(id))
         return Sys::INVALID_ARGUMENT;
     files.makeDir("/var");
     files.makeDir(PERMISSIONS_DIR);
-    Text<128> text;
-    if (granted & PERMISSION_NETWORK)
+    Text<320> text;
+    unsigned bits = grants.permissions;
+    if (bits & PERMISSION_NETWORK)
         text.add("network\n");
-    if (granted & PERMISSION_LOCAL_NETWORK)
+    if (bits & PERMISSION_LOCAL_NETWORK)
         text.add("local-network\n");
-    if (granted & PERMISSION_FILES)
+    if (bits & PERMISSION_FILES)
         text.add("files\n");
+    if (bits & PERMISSION_FOLDER)
+        text.add("folder\n");
+    if (bits & PERMISSION_HOSTS)
+        text.add("hosts\n");
+    if (grants.folder[0])
+        text.add("folder = ").add(grants.folder).add("\n");
+    if (grants.hosts[0])
+        text.add("hosts = ").add(grants.hosts).add("\n");
     Text<96> path;
     permissionsPath(id, path);
     long r = files.write(path.cstr(), text.cstr(), length(text.cstr()));
     return r < 0 ? r : Sys::OK;
+}
+
+unsigned readPermissions(Files& files, char const* id) { return readGrants(files, id).permissions; }
+
+long writePermissions(Files& files, char const* id, unsigned granted) {
+    Grants grants = readGrants(files, id);
+    grants.permissions = granted;
+    return writeGrants(files, id, grants);
 }
 
 long uninstallApp(Files& files, char const* id) {

@@ -27,8 +27,17 @@ constexpr u64 RFLAGS_INTERRUPTS_ENABLED = 0x202;
 Task* idleTask = nullptr;
 Task* currentTask = nullptr;
 
-Task* readyHead = nullptr;
-Task* readyTail = nullptr;
+// Two ready queues: system tasks (kernel tasks, init and what it starts)
+// always run before apps, and a ready system task preempts an app at the
+// next tick. So an app that spins can slow other apps (round-robin among
+// them) but never the drivers, servers or the desktop.
+struct Queue {
+    Task* head = nullptr;
+    Task* tail = nullptr;
+};
+Queue ready[2]; // 0: system, 1: apps
+
+Queue& queueOf(Task const* t) { return ready[t->privilege == Core::Privilege::App ? 1 : 0]; }
 Task* sleeping = nullptr;
 Task* zombies = nullptr;
 Task* everyTask = nullptr; // linked by allNext
@@ -38,30 +47,34 @@ u64 liveTasks = 0;
 u64 sliceStart = 0;
 
 void enqueue(Task* t) {
+    Queue& q = queueOf(t);
     t->next = nullptr;
-    if (readyTail)
-        readyTail->next = t;
+    if (q.tail)
+        q.tail->next = t;
     else
-        readyHead = t;
-    readyTail = t;
+        q.head = t;
+    q.tail = t;
 }
 
 void enqueueFront(Task* t) {
-    t->next = readyHead;
-    readyHead = t;
-    if (not readyTail)
-        readyTail = t;
+    Queue& q = queueOf(t);
+    t->next = q.head;
+    q.head = t;
+    if (not q.tail)
+        q.tail = t;
 }
 
 Task* dequeue() {
-    Task* t = readyHead;
-    if (t) {
-        readyHead = t->next;
-        if (not readyHead)
-            readyTail = nullptr;
-        t->next = nullptr;
+    for (Queue& q : ready) {
+        if (Task* t = q.head) {
+            q.head = t->next;
+            if (not q.head)
+                q.tail = nullptr;
+            t->next = nullptr;
+            return t;
+        }
     }
-    return t;
+    return nullptr;
 }
 
 void wakeSleepers(u64 now) {
@@ -204,6 +217,7 @@ Task* spawnKernel(char const* name, void (*entry)(u64), u64 arg) {
     if (not t)
         return nullptr;
 
+    t->privilege = Core::Privilege::System;
     Arch::Frame* frame = initialFrame(t);
     frame->rip = reinterpret_cast<u64>(&kernelTaskStart);
     frame->rdi = reinterpret_cast<u64>(entry);
@@ -344,9 +358,12 @@ Arch::Frame* onTimerTick(Arch::Frame* frame) {
     u64 now = Time::now();
     wakeSleepers(now);
 
-    if (not readyHead)
+    if (currentTask != idleTask)
+        currentTask->cpuMs++; // the 1 ms tick lands on whoever is running
+    if (not ready[0].head and not ready[1].head)
         return frame;
-    if (currentTask == idleTask or now - sliceStart >= TIME_SLICE_MS)
+    bool appPreempted = currentTask->privilege == Core::Privilege::App and ready[0].head;
+    if (currentTask == idleTask or appPreempted or now - sliceStart >= TIME_SLICE_MS)
         return switchFrom(frame);
     return frame;
 }

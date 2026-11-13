@@ -54,6 +54,7 @@ struct Task {
     Vmm::Space* space = nullptr; // nullptr for kernel tasks
     Quota* quota = nullptr;      // user tasks: the memory it may hold (holds a reference)
     Privilege privilege = Privilege::App;
+    u64 cpuMs = 0; // CPU time used so far (in 1 ms timer ticks)
     u64 wakeAt = 0;
     u64 waitDeadline = 0; // while in a timed SYS_WAIT: when it gives up (0 = none)
     i64 exitCode = 0;

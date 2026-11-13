@@ -9,6 +9,8 @@
 //                  and permissions (see Permission)
 //   app.elf        the program (built against Kapalaframe, like any app)
 //   icon.png       its icon (optional; square, 64 px or more looks best)
+//   signature      last: an Ed25519 signature (64 bytes) of every byte before
+//                  this file's entry, by a key in the boot image's trust.bin
 //
 // Installing puts those files in /apps/<id>/ on the disk; KamalShell shows
 // installed apps in the dock and the app grid and starts them like the
@@ -32,7 +34,16 @@ namespace Kapala {
 enum Permission : unsigned {
     PERMISSION_LOCAL_NETWORK = 1 << 0, // "local-network": computers on the local network
     PERMISSION_NETWORK = 1 << 1,       // "network": the internet (and the local network)
-    PERMISSION_FILES = 1 << 2,         // "files": the user's files, not just its own folder
+    PERMISSION_FILES = 1 << 2,         // "files": all the user's files, not just its own folder
+    PERMISSION_FOLDER = 1 << 3,        // "folder": one user folder (the user picks it), as /shared
+    PERMISSION_HOSTS = 1 << 4,         // the hosts in the manifest's "hosts" line, nothing else
+};
+
+// What was granted to an installed app.
+struct Grants {
+    unsigned permissions = 0; // Permission bits
+    char folder[64] = {};     // PERMISSION_FOLDER: which folder ("/Documents")
+    char hosts[88] = {};      // PERMISSION_HOSTS: the names, separated by spaces
 };
 
 constexpr char const* PERMISSIONS_DIR = "/var/permissions";
@@ -44,6 +55,7 @@ struct AppInfo {
     char author[40];
     char description[160];
     unsigned permissions; // asked for in the manifest (Permission bits)
+    char hosts[88];       // "hosts = api.example.com *.cdn.example.com": the only hosts it needs
 };
 
 constexpr unsigned long MAX_APP_SIZE = 16 * 1024 * 1024;
@@ -72,17 +84,25 @@ private:
 // Reads "key = value" lines.
 bool parseManifest(char const* text, unsigned long length, AppInfo& out);
 
-// Installs (or updates) a package on the disk. OK, or an error with `error`
-// saying why.
+// True if the package is signed by a key Bhairav OS trusts (trust.bin in
+// the boot image). Sets error otherwise.
+bool verifyPackage(unsigned char const* data, unsigned long length, char const*& error);
+
+// Installs (or updates) a package on the disk: only signed ones, and an
+// update never goes back to an older version. OK, or an error with
+// `error` saying why.
 long installPackage(Files& files, unsigned char const* data, unsigned long length, AppInfo& out,
                     char const*& error);
 
 // Removes the app, its private folder and its permissions.
 long uninstallApp(Files& files, char const* id);
 
-// The permissions granted to an installed app (0 if none were).
-unsigned readPermissions(Files& files, char const* id);
+// What was granted to an installed app (nothing, if never saved).
+Grants readGrants(Files& files, char const* id);
+long writeGrants(Files& files, char const* id, Grants const& grants);
 
+// Just the Permission bits; writing them keeps the folder and hosts.
+unsigned readPermissions(Files& files, char const* id);
 long writePermissions(Files& files, char const* id, unsigned granted);
 
 // Permission bits from words like "network files" (unknown words are skipped).

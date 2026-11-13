@@ -88,7 +88,17 @@ appObjs = $(patsubst %,$(BUILD)/%.o,$(shell find apps/$(1) -name '*.cpp'))
 BPK := $(BUILD)/tools/bpk
 
 STRIPPED := $(BOOT_FILES)/rudracore.elf $(USER_PROGRAMS:%=$(BOOT_FILES)/%.elf) $(BOOT_FILES)/fonts.bin \
-	$(BOOT_FILES)/catalog.bin
+	$(BOOT_FILES)/catalog.bin $(BOOT_FILES)/trust.bin $(BOOT_FILES)/roots.bin
+
+# The certificate authorities HTTPS trusts: the build machine's bundle
+# (Mozilla's list, from the ca-certificates package), as roots.bin.
+CA_BUNDLE ?= /etc/ssl/certs/ca-certificates.crt
+
+# Packages are signed (Ed25519) with this key, made the first time. It
+# lives outside build/ so `make clean` keeps it (packages already installed
+# stay updatable) and is never committed (see .gitignore). Bhairav OS only
+# installs packages signed by a key in trust.bin, made from it.
+SIGNING_KEY ?= keys/package-signing.pem
 
 # The UEFI boot image: a FAT file system with ShoolLoader as the default
 # UEFI boot program, plus the kernel, programs and shool.cfg.
@@ -199,11 +209,34 @@ $(BPK): tools/bpk.cpp
 	@mkdir -p $(@D)
 	clang++ -std=c++20 -O2 $< -o $@
 
-$(BUILD)/packages/%.bpk: $(BUILD)/app-elf/%.elf apps/%/manifest.txt $(BPK)
+$(SIGNING_KEY):
+	@mkdir -p $(@D)
+	openssl genpkey -algorithm ed25519 -out $@
+	@echo "made a new package signing key: $@ (keep it private, don't lose it)"
+
+$(BUILD)/packages/%.bpk: $(BUILD)/app-elf/%.elf apps/%/manifest.txt $(BPK) $(SIGNING_KEY)
 	@mkdir -p $(@D)
 	llvm-strip -o $(@D)/$*.elf $<
-	$(BPK) pack $@ apps/$*/manifest.txt $(@D)/$*.elf $(wildcard apps/$*/icon.png)
-	rm -f $(@D)/$*.elf
+	$(BPK) pack $@.unsigned apps/$*/manifest.txt $(@D)/$*.elf $(wildcard apps/$*/icon.png)
+	$(BPK) tbs $@.unsigned $@.tbs
+	openssl pkeyutl -sign -rawin -inkey $(SIGNING_KEY) -in $@.tbs -out $@.sig
+	$(BPK) attach $@.tbs $@.sig $@
+	rm -f $(@D)/$*.elf $@.unsigned $@.tbs $@.sig
+
+# roots.bin: a catalog (the .bpk catalog format) of the DER certificates.
+$(BOOT_FILES)/roots.bin: $(CA_BUNDLE) $(BPK)
+	@mkdir -p $(@D)
+	rm -rf $(BUILD)/roots && mkdir -p $(BUILD)/roots
+	awk '/BEGIN CERTIFICATE/ { n++; f = sprintf("$(BUILD)/roots/%03d.pem", n) } f { print > f } /END CERTIFICATE/ { close(f); f = "" }' $<
+	for f in $(BUILD)/roots/*.pem; do openssl x509 -in $$f -outform DER -out $${f%.pem}.der; done
+	$(BPK) catalog $@ $(BUILD)/roots/*.der 2>/dev/null
+
+# The keys Bhairav OS trusts for packages: "BTK1", a 32-bit count, then
+# each 32-byte Ed25519 public key (the last 32 bytes of its DER form).
+$(BOOT_FILES)/trust.bin: $(SIGNING_KEY)
+	@mkdir -p $(@D)
+	printf 'BTK1\001\000\000\000' > $@
+	openssl pkey -in $< -pubout -outform DER | tail -c 32 >> $@
 
 packages: $(PACKAGES)
 

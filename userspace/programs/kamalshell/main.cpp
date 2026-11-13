@@ -370,30 +370,36 @@ private:
         // What it may reach: a built-in's fixed profile, or what the user
         // granted an installed app (nothing but its own folder by default).
         Profile profile{Scope::Private, Access::None};
+        Grants grants;
         int builtIn = findBuiltIn(program);
         if (builtIn >= 0) {
             profile = APPS[builtIn].profile;
         } else if (_filesOk) {
-            unsigned granted = readPermissions(_files, program);
+            grants = readGrants(_files, program);
+            unsigned granted = grants.permissions;
             if (granted & PERMISSION_FILES)
                 profile.files = Scope::User;
+            else if (not(granted & PERMISSION_FOLDER))
+                grants.folder[0] = '\0'; // no folder of the user's
             if (granted & PERMISSION_NETWORK)
                 profile.network = Access::Internet;
             else if (granted & PERMISSION_LOCAL_NETWORK)
                 profile.network = Access::Local;
+            else if ((granted & PERMISSION_HOSTS) and grants.hosts[0])
+                profile.network = Access::Hosts;
         }
 
         // The app's own file system connection.
         Channel files, filesServer;
         Channel::createPair(files, filesServer);
-        auto filesHello = makeConnect(profile.files, program);
+        auto filesHello = makeConnect(profile.files, program, profile.files == Scope::Private ? grants.folder : "");
         if (Sys::send(FILES, &filesHello, sizeof(filesHello), filesServer.handle()) == Sys::OK)
             filesServer.release(); // moved to fs
 
         // And its network connection.
         Channel net, netServer;
         Channel::createPair(net, netServer);
-        auto netHello = makeConnect(profile.network, program);
+        auto netHello = makeConnect(profile.network, program, profile.network == Access::Hosts ? grants.hosts : "");
         if (Sys::send(NETWORK, &netHello, sizeof(netHello), netServer.handle()) == Sys::OK)
             netServer.release(); // moved to net
 

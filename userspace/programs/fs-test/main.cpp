@@ -1,7 +1,7 @@
 // fs-test: checks the disk and file system at every boot, then cleans up.
 //
 //   handle 1: a connection to the fs server (System scope)
-//   handles 2, 3: User and Private connections, to check the scopes
+//   handles 2-5: User, Private, Private with a folder, and a refused one
 //
 // Makes a directory, writes files with short and long names, reads them
 // back, appends, writes a file bigger than one transfer, lists, removes
@@ -80,6 +80,21 @@ void checkScopes() {
     check(n >= 0 and not shown, "apps' storage isn't listed");
     check(user.write("/fs-test-user.txt", "u", 1) == 1, "the user's own files are writable");
     files.remove("/fs-test-user.txt");
+
+    // One user folder (handle 4: /fs-test-shared, seen as /shared), and a
+    // folder that may never be given (handle 5: /var, refused at connect).
+    Files folder, forbidden;
+    check(folder.connect(4), "connect with a folder");
+    check(folder.write("/shared/given.txt", "ok", 2) == 2, "write into the given folder");
+    check(files.read("/fs-test-shared/given.txt", back, sizeof(back)) == 2, "it lands in that folder");
+    check(folder.read("/shared/../shared/given.txt", back, sizeof(back)) == 2, "'..' back into it");
+    check(folder.write("/shared/../../var/x", "x", 1) == Sys::INVALID_ARGUMENT, "'..' can't climb out");
+    check(folder.remove("/shared") == Sys::INVALID_ARGUMENT, "the given folder itself stays");
+    check(folder.write("/own.txt", "x", 1) == 1, "its own storage still works beside it");
+    check(not forbidden.connect(5), "a system folder can't be given");
+    files.remove("/fs-test-shared/given.txt");
+    files.remove("/fs-test-shared");
+    files.remove("/appdata/fs-test/own.txt");
 
     files.remove("/appdata/fs-test/note.txt");
     files.remove("/appdata/fs-test");
