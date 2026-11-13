@@ -1,6 +1,7 @@
 #include "core/syscall.h"
 
 #include "arch/x86_64/io.h"
+#include "arch/x86_64/iommu.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/protect.h"
 #include "core/channel.h"
@@ -15,6 +16,9 @@
 #include "mem/memory.h"
 #include "mem/pmm.h"
 #include "rudracore/syscalls.h"
+#include "config.h"
+
+#define RUDRACORE_FAULT_TEST_DMA (RUDRACORE_FAULT_TEST == 4)
 
 extern "C" void* memcpy(void* dest, void const* src, usize n);
 extern "C" void* memset(void* dest, int value, usize n);
@@ -893,7 +897,8 @@ Arch::Frame* sysDeviceBar(Call const& c) {
 
 Arch::Frame* sysDmaAddress(Call const& c) {
     i64 error = 0;
-    if (not c.lookup<Core::PciDevice>(c.arg0(), ObjectType::PciDevice, Abi::RIGHT_DMA, error))
+    auto* device = c.lookup<Core::PciDevice>(c.arg0(), ObjectType::PciDevice, Abi::RIGHT_DMA, error);
+    if (not device)
         return c.result(error);
     // The device will write it: the driver must be allowed to write it too.
     auto* memory = c.lookup<Core::SharedMemory>(c.arg1(), ObjectType::Memory, Abi::RIGHT_WRITE, error);
@@ -901,6 +906,13 @@ Arch::Frame* sysDmaAddress(Call const& c) {
         return c.result(error);
     if (not memory->owned)
         return c.result(Abi::INVALID_ARGUMENT); // device memory, not RAM
+    // With VT-d, the device gets exactly this memory and nothing else.
+    // (FAULT_TEST=dma skips this, so the IOMMU must block the driver's DMA.)
+    if (Arch::Iommu::enabled() and not RUDRACORE_FAULT_TEST_DMA) {
+        if (not Arch::Iommu::allow(device->address, memory->physical, memory->size))
+            return c.result(Abi::OUT_OF_MEMORY);
+        memory->dmaMapped = true;
+    }
     return c.result(static_cast<i64>(memory->physical));
 }
 

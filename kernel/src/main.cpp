@@ -2,6 +2,7 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/io.h"
+#include "arch/x86_64/iommu.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/protect.h"
 #include "boot.h"
@@ -136,6 +137,7 @@ void clockTask(u64) {
         Display::drawStatus(Time::now(), Sched::taskCount(),
                             Pmm::stats().freePages * Mem::PAGE_SIZE,
                             Heap::stats().bytesInUse);
+        Arch::Iommu::reportFaults();
         Sched::sleep(250);
     }
 }
@@ -271,6 +273,7 @@ extern "C" [[noreturn]] void kmain(u64 bootMagic, u64 bootInfo) {
 
     testMemory();
     testHeap();
+    Arch::Iommu::init(info); // before any driver can turn on a device's DMA
 
     if constexpr (RUDRACORE_PANIC_TEST) {
         log("[test] writing to an unmapped address on purpose...");

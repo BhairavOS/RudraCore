@@ -33,11 +33,11 @@ file loader.
 | User stack guard | **Enforced (§7)** | Programs must load below 4 GiB. The stack sits below 128 TiB with nothing mapped under it but shared memory far below. |
 | Handles | **Capabilities (§8)** | Each handle has rights (read, write, transfer, duplicate, revoke, MMIO, DMA) and a generation counter, and can be revoked. Rights only shrink. |
 | Who reaches hardware | **Enforced by delegation and rights (§8)** | Only init gets IRQ, I/O-port and PCI handles. It strips them to what each driver uses before moving them, so drivers can't pass devices on. |
-| DMA isolation | **None** | No IOMMU. `SYS_DEVICE_BAR` turns on bus mastering. A driver can make its device DMA to any physical address. |
+| DMA isolation | **Enforced with VT-d (§10)** | Each device reaches only the buffers its driver registered. Without VT-d hardware, unconfined (logged). |
 | Kernel memory accounting | **Added in §6 and §7** | A 4 MiB kernel reserve, plus a per-program quota of half of RAM. |
 | Boot integrity | **None** | ShoolLoader and Limine load every module with no signature or hash. |
-| TLS server authentication | **None** | The certificate is skipped. README states this. |
-| Package integrity | **None** | BPK has no hash or signature. Repositories may be plain `http://`. |
+| TLS server authentication | **Enforced (§10)** | Chain to a trusted root, hostname, dates, and the CertificateVerify signature. Fails closed. |
+| Package integrity | **Enforced (§10)** | Ed25519-signed packages, trusted keys in the boot image, no rollback. |
 | App isolation from data | **Enforced (§9)** | Installed apps see only their own folder and no network unless the user grants more. Built-ins get fixed profiles. |
 | RNG | **Reasonable** | ChaCha20 DRBG keyed from RDRAND (when present), TSC jitter and IRQ timing. It rekeys before and after each output. There is no reseed-health check, and TSC-only seeding (no RDRAND) is weak early in boot. |
 
@@ -86,9 +86,9 @@ firmware↔ShoolLoader↔kernel.
 | ID | Sev | Finding | Status |
 |---|---|---|---|
 | V-01 | High | **An unprivileged program can panic the kernel.** `SYS_MEMORY_ALLOC` (256 MiB per call, no limit on calls), `SYS_MEMORY_CREATE`, spawn and channel creation take physical pages with no reserve. Once RAM is gone, the next kernel `new` (for example `new Endpoint` in `channel_create`) calls `panic("heap: out of memory")`. **Reproduced:** serial log `oom check: took 246 MiB … !!! RudraCore panic: heap: out of memory`. | **Fixed, §6** |
-| V-02 | Critical | **Packages have no integrity.** BPK (`tools/bpk.cpp`) has no hash or signature, apt accepts `http://` sources, and `https://` doesn't authenticate the server. Anyone on the path can replace an app. | Open |
+| V-02 | Critical | **Packages have no integrity.** BPK (`tools/bpk.cpp`) has no hash or signature, apt accepts `http://` sources, and `https://` doesn't authenticate the server. Anyone on the path can replace an app. | **Fixed, §10** |
 | V-03 | Critical | **Apps get the whole disk and network.** `KamalShell::launch` gives every app, built-in or third-party, an unrestricted `fs` and `net` channel. One bad app can overwrite `/apps/<other>/app.elf`. | **Fixed, §9** |
-| V-04 | High | **TLS doesn't check the server certificate.** `tls.cpp` parses the Certificate message and drops it. There is no X.509 parsing, chain, hostname or expiry check, and no trust store. | Open (known) |
+| V-04 | High | **TLS doesn't check the server certificate.** `tls.cpp` parses the Certificate message and drops it. There is no X.509 parsing, chain, hostname or expiry check, and no trust store. | **Fixed, §10** |
 | V-05 | Medium | **Endpoint reference cycles leak kernel memory for good.** Send endpoint `y` over its peer `x` and `y` lands in its own queue holding a reference to itself. Close `x` and `y` can never be freed. Longer cycles work too. | **Fixed, §7** |
 | V-06 | Medium | **Dead tasks' memory wasn't freed while nothing else was runnable.** Zombies were reaped only at a task switch away from a ready task. | **Fixed, §6** (reaped on each timer tick) |
 | V-07 | Low | **Log spoofing.** `SYS_LOG` writes user bytes, including newlines, into the kernel log after a `[name]` prefix. Spawned app names are user-chosen (`SpawnImage.name`), so an app can call itself `init` in the log. | **Fixed, §7** |
@@ -271,3 +271,25 @@ which means writing `/apps` and `/var`.
 - The shell and the servers are trusted to apply all this. A compromised
   KamalShell could connect an app with any scope.
 - There's no CPU-time limit yet.
+
+## 10. Closing the open items
+
+| Item | Design | Checked by |
+|---|---|---|
+| CPU time | Two ready queues: system tasks (kernel, init and what it starts) always run before apps, and a ready system task preempts an app at the next 1 ms tick. Apps share what's left round-robin. Each task's CPU time is counted (`Task::cpuMs`). | harden-test: with an app spinning for 1.5 s, a system task's worst wake-up delay was 0 ms. With preemption switched off as a check, it was 5 ms and the test failed. |
+| Per-folder file grants | Permission `folder`: a Private app also gets one user folder, which it sees as `/shared`. The folder is chosen in the App Store and checked by fs (never `/`, never a protected directory; `..` normalised away). | fs-test: writes land in the folder; `..` can't leave it; it can't be removed; a `/var` grant is refused at connect. |
+| Host allowlists (the proxy route) | Access level `Hosts`: DNS only for the names in the manifest's `hosts` line (`*.` covers subdomains), and ping/TCP only to addresses those lookups returned. A local proxy is just another unlisted address. | net-test: a hosts-only client can't ping the gateway or resolve another name, but can reach example.com. |
+| Signed packages | Ed25519 (RFC 8032, after TweetNaCl) over the whole package; the signature is the last file. Build: `bpk tbs` → `openssl pkeyutl -sign -rawin` → `bpk attach`, key in `keys/` (gitignored). Trusted keys: `trust.bin` in the boot image. `installPackage` refuses unsigned, altered and older versions. | tls-test: RFC 8032 vectors (and tampered ones), SHA-512/384 vectors, every catalog package verifies, one changed byte fails. OpenSSL signs and Bhairav verifies, so the two implementations cross-check. |
+| HTTPS certificates | `x509.cpp` (DER, chain to `roots.bin` from the build machine's CA bundle, dates, CA flag, SAN hostnames, unknown critical extensions refused) plus `pkey.cpp` (Montgomery arithmetic; RSA PKCS #1 and PSS; ECDSA P-256/P-384). TLS verifies the chain and the CertificateVerify signature over the transcript, and fails closed. | tls-test: example.com and wikipedia.org verify. A wrong host name, an expired chain, no roots and a changed certificate are all refused. Also tried: debian.org, microsoft.com, github.com and kernel.org all verify, exercising ECDSA SHA-256/384, RSA PKCS #1 SHA-256/384 and RSA-PSS. |
+| IOMMU | Intel VT-d (`arch/x86_64/iommu.cpp`). The ACPI DMAR table names the units. One root table, a context entry per device, a second-level page table per device. Every device starts blocked. `dma_address` maps exactly that buffer for that device (same address); freeing the buffer unmaps it and flushes the IOTLB before the pages are reused. Blocked DMA is logged. | `IOMMU=1`: every boot check passes through the mappings. `IOMMU=1 FAULT_TEST=dma`: the AHCI and e1000 DMA are blocked and logged, and the disk stops. Without VT-d the log says DMA is unconfined. |
+
+**Limits.**
+- CPU priority is two levels, not per-app shares or caps.
+- The root store is the build machine's bundle. There's no revocation
+  checking (OCSP/CRL), and no IP-address names.
+- A lost signing key means packages built with a new key won't update
+  installed ones signed by the old key, unless both keys are in
+  `trust.bin`.
+- VT-d needs the hardware. Interrupt remapping is not done (devices use the
+  legacy PIC). AMD IOMMU is not supported. A compromised driver can still
+  misuse the buffers it registered.

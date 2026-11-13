@@ -68,6 +68,8 @@ struct Info {
 
     Module modules[MAX_MODULES];
     usize moduleCount;
+
+    u64 acpiRsdp; // physical address of the ACPI RSDP, or 0
 };
 
 // Reads the boot information from whichever bootloader started the kernel.

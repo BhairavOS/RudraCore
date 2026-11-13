@@ -106,6 +106,15 @@ A `.bpk` is `"BPK1"`, a 32-bit file count, then per file a 32-byte name,
 a 32-bit size and the bytes (`tools/bpk.cpp` makes them; details in
 `kapala/apps.h`).
 
-**Note:** packages aren't signed yet, so install only apps from sources you
-trust. Permissions limit what an installed app can reach, but an app you
+Packages are signed: `make packages` signs each with `keys/package-signing.pem`
+(made the first time, never committed; keep it), and the boot image's
+`trust.bin` holds its public key. Bhairav OS refuses unsigned or altered
+packages, and updates that go back to an older version.
+
+More permissions in the manifest: `permissions = folder` asks for one of the
+user's folders (the user picks it; the app sees it as `/shared`), and
+`hosts = api.example.com *.cdn.example.com` limits the app to those hosts:
+it can look up only those names and reach only the addresses they return.
+
+**Note:** permissions limit what an installed app can reach, but an app you
 granted `files` and `network` could still send your files somewhere.

@@ -17,6 +17,7 @@ struct SharedMemory : public Object {
     bool owned = false;
     bool isScreen = false; // the boot framebuffer: mapping it hands the screen to userspace
     bool readOnly = false; // mapped without write access (boot image files)
+    bool dmaMapped = false; // given to a device through the IOMMU (dma_address)
     Vmm::Cache cache = Vmm::Cache::WriteBack;
 
     SharedMemory() : Object(ObjectType::Memory) {}

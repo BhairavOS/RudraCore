@@ -64,6 +64,13 @@ volatile limine_module_request moduleRequest = {
     .internal_modules = nullptr,
 };
 
+[[gnu::used, gnu::section(".limine_requests")]]
+volatile limine_rsdp_request rsdpRequest = {
+    .id = LIMINE_RSDP_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr,
+};
+
 [[gnu::used, gnu::section(".limine_requests_end")]]
 volatile u64 requestsEnd[] = LIMINE_REQUESTS_END_MARKER;
 
@@ -177,6 +184,7 @@ void collectFromShool(Shool::BootInfo const& boot) {
         module.size = m.size;
         copyString(module.name, sizeof(module.name), m.name);
     }
+    info.acpiRsdp = boot.acpiRsdp;
 }
 
 } // namespace
@@ -245,6 +253,12 @@ Info const& collect(u64 magic, u64 shoolInfo) {
             module.size = file->size;
             moduleName(module.name, sizeof(module.name), file->path);
         }
+    }
+
+    if (auto* res = rsdpRequest.response) {
+        // Physical or direct-mapped, depending on the protocol revision.
+        u64 address = reinterpret_cast<u64>(res->address);
+        info.acpiRsdp = address >= info.hhdmOffset ? address - info.hhdmOffset : address;
     }
 
     return info;

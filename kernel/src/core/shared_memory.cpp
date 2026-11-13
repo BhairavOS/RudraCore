@@ -1,11 +1,15 @@
 #include "core/shared_memory.h"
 
+#include "arch/x86_64/iommu.h"
+
 #include "mem/memory.h"
 #include "mem/pmm.h"
 
 namespace Rudracore::Core {
 
 SharedMemory::~SharedMemory() {
+    if (dmaMapped)
+        Arch::Iommu::revoke(physical, size); // no device may write it once it's reused
     if (owned)
         Pmm::free(physical, size / Mem::PAGE_SIZE);
 }

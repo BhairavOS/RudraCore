@@ -724,7 +724,7 @@ private:
         else
             netMeaning.add("Local network: computers at home or work. Internet: anywhere.");
         permissionRow(c, 0, "Network", netMeaning.cstr(), network, true);
-        permissionRow(c, 1, "Your files", "One folder (below, seen by the app as /shared), or all. Never other apps' data.",
+        permissionRow(c, 1, "Your files", "One folder (seen by it as /shared), or all of them.",
                       g & PERMISSION_FILES ? "All" : g & PERMISSION_FOLDER ? "One folder" : "Off", true);
         drawFolderRow(c);
         permissionRow(c, 3, "Hardware", "Apps never use devices directly: only Bhairav's own drivers can.", "Never", false);

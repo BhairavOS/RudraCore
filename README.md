@@ -59,6 +59,8 @@ make shot SECURITY_TEST=1 WAIT=20      # also run oom-test: per-program quota an
 CPU=max make shot                      # a QEMU CPU with SMEP and SMAP (the default model has neither)
 CPU=max make shot FAULT_TEST=stack     # the kernel breaks a protection on purpose (stack, smep or smap):
                                        #   the boot must end in a panic naming that fault
+IOMMU=1 make shot                      # add an Intel VT-d IOMMU: devices reach only their drivers' buffers
+IOMMU=1 make shot FAULT_TEST=dma       # don't map drivers' buffers: the IOMMU must block (and log) their DMA
 make shot FIRMWARE=uefi WAIT=9         # boot through UEFI instead of BIOS
 STEP=0.1 MONITOR="..." make shot       # faster mouse commands (e.g. double clicks)
 NIC=rtl8139 make shot                  # a Realtek network card instead of the Intel one
