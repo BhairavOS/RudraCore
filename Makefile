@@ -100,6 +100,14 @@ BOOT_KEY ?= keys/boot-signing.pem
 BOOT_VERSION ?= 1
 SIGNED_BOOT := $(BOOT_FILES)/shool.cfg $(BOOT_FILES)/shool.sum $(BOOT_FILES)/shool.sig
 
+# Kernel fallback: PREVIOUS_KERNEL=path/to/a/known-good/rudracore.elf ships
+# it as /boot/rudracore-previous.elf (signed like the rest), and the
+# "previous" entry in shool.cfg (normal's fallback) starts it. Without it,
+# that entry is left out of the menu.
+ifneq ($(PREVIOUS_KERNEL),)
+STRIPPED += $(BOOT_FILES)/rudracore-previous.elf
+endif
+
 # UEFI Secure Boot: BOOTX64.EFI (ShoolLoader) is signed with this db key
 # (RSA, Authenticode, by sbsign), made the first time with a self-signed
 # certificate. Enroll build/secureboot.cer in the firmware's db (its setup
@@ -141,7 +149,7 @@ QEMU_FLAGS := -M q35 -m 256M -cdrom $(ISO) -boot d \
 	-drive file=$(DISK),format=raw,if=none,id=disk -device ide-hd,drive=disk,bus=ide.0 \
 	-netdev user,id=net -device $(NIC),netdev=net
 
-.PHONY: all kernel user shool iso disk packages repo serve-repo install-app run run-uefi run-secureboot \
+.PHONY: all kernel user shool iso disk disk-image packages repo serve-repo install-app run run-uefi run-secureboot \
 	secure-boot-vars shot clean FORCE
 
 all: iso $(DISK)
@@ -250,10 +258,14 @@ $(BUILD)/secureboot.cer: $(SB_CERT)
 secure-boot-vars: $(BUILD)/ovmf-vars-secureboot.fd
 
 $(BUILD)/ovmf-vars-secureboot.fd: $(SB_CERT)
-	virt-fw-vars --input /usr/share/OVMF/OVMF_VARS_4M.fd --output $@ \
-		--enroll-cert $(SB_CERT) --no-microsoft --secure-boot >/dev/null
+	virt-fw-vars --input /usr/share/OVMF/OVMF_VARS_4M.fd --output $@ --enroll-cert $(SB_CERT) \
+		--add-db 7a0f3d1e-5b2c-4e8f-9d61-3c4b2a1f0e57 $(SB_CERT) --no-microsoft --secure-boot >/dev/null 2>&1
 
 $(BOOT_FILES)/rudracore.elf: $(KERNEL)
+	@mkdir -p $(@D)
+	llvm-strip -o $@ $<
+
+$(BOOT_FILES)/rudracore-previous.elf: $(PREVIOUS_KERNEL)
 	@mkdir -p $(@D)
 	llvm-strip -o $@ $<
 
@@ -420,6 +432,32 @@ $(ISO): $(EFI_IMG) $(STRIPPED) $(BUILD)/limine.conf
 		--efi-boot boot/efiboot.img -efi-boot-part --efi-boot-image \
 		--protective-msdos-label $(ISOROOT) -o $@
 	$(LIMINE_DIR)/limine bios-install $@ 2>/dev/null
+
+# A disk image to install from (write it to a USB stick or a disk): a GPT
+# with an EFI System Partition (ShoolLoader, the signed boot files, and
+# Limine for BIOS machines) and a Bhairav data partition (FAT32, the user's
+# files; the fs server serves only this one). Boots with UEFI and BIOS.
+DISK_IMAGE := $(BUILD)/bhairavos.img
+ESP_MB := 64
+DATA_MB := 64
+DATA_PARTITION_TYPE := B4A1F0E2-6D3C-4B8A-9E7F-2C5D1A0B3E64
+
+disk-image: $(DISK_IMAGE)
+
+$(DISK_IMAGE): $(ISO) assets/welcome.txt
+	rm -f $@.tmp
+	dd if=/dev/zero of=$@.tmp bs=1M count=$$((1 + $(ESP_MB) + $(DATA_MB) + 1)) status=none
+	sgdisk --clear --new=1:2048:+$(ESP_MB)M --typecode=1:EF00 --change-name=1:"EFI System" \
+		--new=2:0:+$(DATA_MB)M --typecode=2:$(DATA_PARTITION_TYPE) --change-name=2:"Bhairav data" $@.tmp >/dev/null
+	mformat -i $@.tmp@@1048576 -T $$(($(ESP_MB) * 2048)) -h 64 -s 32 -F -v BHAIRAVESP ::
+	mmd -i $@.tmp@@1048576 ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
+	mcopy -i $@.tmp@@1048576 $(SIGNED_EFI) ::/EFI/BOOT/BOOTX64.EFI
+	mcopy -i $@.tmp@@1048576 $(STRIPPED) $(SIGNED_BOOT) ::/boot/
+	mcopy -i $@.tmp@@1048576 $(ISOROOT)/boot/limine/limine.conf $(ISOROOT)/boot/limine/limine-bios.sys ::/boot/limine/
+	mformat -i $@.tmp@@$$(((1 + $(ESP_MB)) * 1048576)) -T $$(($(DATA_MB) * 2048)) -h 64 -s 32 -F -v BHAIRAV ::
+	mcopy -i $@.tmp@@$$(((1 + $(ESP_MB)) * 1048576)) assets/welcome.txt ::/welcome.txt
+	$(LIMINE_DIR)/limine bios-install $@.tmp >/dev/null
+	mv $@.tmp $@
 
 # Serial console in the terminal (no window). Quit with Ctrl+A then X.
 run: $(ISO) $(DISK)

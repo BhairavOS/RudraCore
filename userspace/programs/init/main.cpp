@@ -210,11 +210,23 @@ int main() {
     }
 #endif
 
-    Sys::spawn("protect-test");
-    Sys::spawn("harden-test");
-    Sys::spawn("fpu-test"); // two at once: their floating-point
-    Sys::spawn("fpu-test"); // registers must not mix
-    checkIpc();
+    // Safe and recovery boots skip the self-tests (fewer moving parts);
+    // safe mode also leaves the network off.
+    Sys::SystemInfo info;
+    Sys::systemInfo(info);
+    bool selfTests = info.bootMode == Sys::BOOT_NORMAL;
+    if (info.bootMode == Sys::BOOT_SAFE)
+        Sys::log("safe mode: no network, no installed apps, no self-tests");
+    else if (info.bootMode == Sys::BOOT_RECOVERY)
+        Sys::log("recovery mode: no installed apps, no self-tests; a Terminal opens");
+
+    if (selfTests) {
+        Sys::spawn("protect-test");
+        Sys::spawn("harden-test");
+        Sys::spawn("fpu-test"); // two at once: their floating-point
+        Sys::spawn("fpu-test"); // registers must not mix
+        checkIpc();
+    }
 
     Channel files = startStorage();
     // fs-test also checks the scopes: one connection of each kind.
@@ -224,17 +236,26 @@ int main() {
                                             Protocol::Fs::makeConnect(Scope::Private, "fs-test"),
                                             Protocol::Fs::makeConnect(Scope::Private, "fs-test", "/fs-test-shared"),
                                             Protocol::Fs::makeConnect(Scope::Private, "fs-test", "/var")};
-    spawnConnected("fs-test", files, fsTest);
-    Channel network = startNetwork();
+    if (selfTests)
+        spawnConnected("fs-test", files, fsTest);
+    Channel network;
+    if (info.bootMode == Sys::BOOT_SAFE) {
+        Channel unused; // closed at once: whoever asks for the network gets PEER_CLOSED
+        Channel::createPair(network, unused);
+    } else {
+        network = startNetwork();
+    }
     // net-test also checks the access levels: one connection of each kind.
     using Protocol::Net::Access;
     Protocol::Net::Connect const netTest[] = {Protocol::Net::makeConnect(Access::Internet, "net-test"),
                                               Protocol::Net::makeConnect(Access::None, "net-test"),
                                               Protocol::Net::makeConnect(Access::Local, "net-test"),
                                               Protocol::Net::makeConnect(Access::Hosts, "net-test", "example.com")};
-    spawnConnected("net-test", network, netTest);
     Protocol::Net::Connect const tlsTest[] = {Protocol::Net::makeConnect(Access::Internet, "tls-test")};
-    spawnConnected("tls-test", network, tlsTest);
+    if (selfTests) {
+        spawnConnected("net-test", network, netTest);
+        spawnConnected("tls-test", network, tlsTest);
+    }
 
     // Input: the PS/2 driver gets the controller and both IRQs, and sends
     // events to whoever holds the other end of `input`.
@@ -245,8 +266,6 @@ int main() {
     if (Sys::spawn("ps2", ps2, 4) < 0)
         Sys::log("can't start the PS/2 driver");
 
-    Sys::SystemInfo info;
-    Sys::systemInfo(info);
     if (info.screenWidth == 0)
         echoKeyboard(input);
 

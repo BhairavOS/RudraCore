@@ -35,6 +35,13 @@ void printSize(uint64_t bytes);
 // ExitBootServices.
 [[noreturn]] void fail(char const* what, Efi::Status status = 0);
 
+// Kernel fallback: while armed, fail() doesn't leave the loader. It frees
+// every page allocated since arming and jumps back to where
+// __builtin_setjmp(fallbackPoint) was called, to try another entry.
+extern void* fallbackPoint[5];
+void armFallback();
+void disarmFallback();
+
 // The character of a key waiting in the firmware's buffer, or 0 (doesn't wait).
 Efi::Char16 pendingKey();
 
@@ -63,24 +70,48 @@ Efi::File* openBootVolume();
 // Reads a whole file ("/boot/x.elf") into fresh pages of `type`.
 bool readFile(Efi::File* root, char const* path, Efi::MemoryType type, FileData& out);
 
-struct Config {
-    static constexpr uint32_t MAX_PATH = 96;
+constexpr uint32_t MAX_PATH = 96;
+constexpr uint32_t MAX_NAME = 24;
 
+// One way to start the system: a menu entry.
+struct Entry {
+    char name[MAX_NAME];   // "normal" (lowercase letters, digits, '-')
+    char title[48];        // shown in the menu
     char kernel[MAX_PATH];
     char modules[Shool::BootInfo::MAX_MODULES][MAX_PATH];
     uint32_t moduleCount;
-    uint32_t width, height; // preferred resolution, 0 = automatic
+    uint32_t mode;         // Shool::BootMode
     bool diagnostic;
+    int32_t fallback;      // the entry to try if this one fails to load, or -1
 };
 
-// Reads /boot/shool.cfg (defaults when missing):
-//   kernel = /boot/rudracore.elf   (exactly once)
-//   module = /boot/init.elf        (up to 32, each once)
-//   resolution = 1280x800          (optional)
-//   diagnostic = yes               (optional: as if D were held)
-// Any error (unknown key, bad value, overlong path, control character)
+struct Config {
+    static constexpr uint32_t MAX_ENTRIES = 8;
+
+    Entry entries[MAX_ENTRIES];
+    uint32_t entryCount;
+    uint32_t defaultEntry;
+    uint32_t timeout;       // seconds the menu waits (0: no menu)
+    uint32_t width, height; // preferred resolution, 0 = automatic
+};
+
+// Reads /boot/shool.cfg (one entry with the defaults when it's missing).
+//   timeout = 3                    seconds the menu waits, 0-30 (global)
+//   default = normal               the entry to start (global; else the first)
+//   resolution = 1280x800          (global, optional)
+//   entry = normal                 starts an entry; what follows belongs to it:
+//     title = Bhairav OS           shown in the menu
+//     like = normal                copy an earlier entry's kernel and modules
+//     kernel = /boot/rudracore.elf (exactly once, or from `like`)
+//     module = /boot/init.elf      (up to 32, each once)
+//     mode = normal | safe | recovery
+//     diagnostic = yes | no        (as if D were held)
+//     fallback = safe              tried if this entry fails to load
+// Settings before the first `entry =` that belong to an entry make an
+// entry called "default" (the old single-entry form). Any error (unknown
+// key, bad value, overlong path, control character, unknown entry name)
 // fail()s with its line number.
-Config readConfig(Efi::File* root);
+Config const& readConfig(Efi::File* root);
 
 // "/boot/init.elf" -> "init"
 void baseName(char* dest, uint64_t size, char const* path);
@@ -93,6 +124,9 @@ void loadBootManifest(Efi::File* root);
 
 // fail()s unless the file is in the signed list with this content.
 void verifyFile(char const* path, FileData const& file);
+
+// True if the signed list names the file (whatever its content).
+bool isListed(char const* path);
 
 // MARK: Kernel
 

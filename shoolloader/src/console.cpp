@@ -63,6 +63,26 @@ bool waitForKey(uint64_t seconds) {
     return false;
 }
 
+namespace {
+
+struct Allocation {
+    uint64_t address, pages;
+};
+Allocation tracked[96];
+uint32_t trackedCount = 0;
+bool armed = false;
+
+} // namespace
+
+void* fallbackPoint[5];
+
+void armFallback() {
+    trackedCount = 0;
+    armed = true;
+}
+
+void disarmFallback() { armed = false; }
+
 void fail(char const* what, Efi::Status status) {
     print("\nShoolLoader: can't boot: ");
     print(what);
@@ -70,6 +90,16 @@ void fail(char const* what, Efi::Status status) {
         print(" (UEFI status ");
         printNumber(status & ~Efi::ERROR_BIT);
         print(")");
+    }
+    if (armed) {
+        // Give back what this attempt took, then try the fallback entry.
+        armed = false;
+        for (uint32_t i = 0; i < trackedCount; i++)
+            bootServices->freePages(tracked[i].address, tracked[i].pages);
+        trackedCount = 0;
+        print("\n");
+        bootServices->stall(1500 * 1000);
+        __builtin_longjmp(fallbackPoint, 1);
     }
     print("\n\nPress a key, or wait 30 seconds, to go back to the firmware:\n"
           "it tries the next boot option (a recovery medium, another system).\n");
@@ -97,6 +127,8 @@ uint64_t allocatePages(uint64_t count, Efi::MemoryType type) {
     if (Efi::failed(status))
         fail("out of memory", status);
     zeroMemory(reinterpret_cast<void*>(address), count * PAGE_SIZE);
+    if (armed and trackedCount < sizeof(tracked) / sizeof(tracked[0]))
+        tracked[trackedCount++] = {address, count}; // shortcut: past 96 allocations a failed attempt leaks the rest
     return address;
 }
 

@@ -52,6 +52,9 @@ void logBootInfo(Boot::Info const& info) {
     log("[boot] modules     ", info.moduleCount);
     log("[boot] integrity   ", info.verifiedBoot ? "verified boot (signed boot files)" : "boot files not signature-checked",
         info.secureBoot ? ", Secure Boot on" : ", Secure Boot off");
+    log("[boot] mode        ", info.mode == Abi::BOOT_SAFE       ? "safe (no network, no third-party apps, no self-tests)"
+                               : info.mode == Abi::BOOT_RECOVERY ? "recovery (no third-party apps; a Terminal opens)"
+                                                                 : "normal");
     if (not info.diagnostic)
         return;
     log("[diag] diagnostic boot: memory map after validation (", info.memoryFixes, " repair(s))");

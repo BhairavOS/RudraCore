@@ -129,6 +129,11 @@ void loadBootManifest(Efi::File* root) {
     print("\n");
 }
 
+bool isListed(char const* path) {
+    uint8_t ignored[32];
+    return listedHash(fileName(path), ignored);
+}
+
 void verifyFile(char const* path, FileData const& file) {
     uint8_t listed[32], actual[32];
     if (not listedHash(fileName(path), listed)) {

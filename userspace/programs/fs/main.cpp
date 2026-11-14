@@ -7,7 +7,8 @@
 //      channel attached (protocol/fs.h)
 //
 // Supports long file names, subdirectories, and a disk that is either a
-// whole FAT32 volume or has one in its first MBR partition. Metadata goes
+// whole FAT32 volume, has one in its first MBR partition, or has a GPT with
+// a Bhairav data partition (the EFI System Partition is never served). Metadata goes
 // through a small sector cache; every change is written back (and the disk
 // flushed) before the reply.
 
@@ -314,17 +315,93 @@ struct Node {
     u32 size() const { return get32(entry + 28); }
 };
 
+// MARK: GPT
+
+u64 get64(u8 const* p) { return u64{get32(p)} | u64{get32(p + 4)} << 32; }
+
+u32 crc32(u8 const* p, u64 n, u32 crc = 0) { // (chainable: pass the previous result)
+    crc = ~crc;
+    for (u64 i = 0; i < n; i++) {
+        crc ^= p[i];
+        for (int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1)));
+    }
+    return ~crc;
+}
+
+// The Bhairav data partition's type, B4A1F0E2-6D3C-4B8A-9E7F-2C5D1A0B3E64,
+// as GPT stores it (the first three fields little-endian).
+constexpr u8 DATA_PARTITION[16] = {0xE2, 0xF0, 0xA1, 0xB4, 0x3C, 0x6D, 0x8A, 0x4B,
+                                   0x9E, 0x7F, 0x2C, 0x5D, 0x1A, 0x0B, 0x3E, 0x64};
+
+// Reads the GPT header at `lba` (1, or the backup at the last sector) and
+// its entry array, both CRC-checked and bounds-checked, and finds the first
+// Bhairav data partition. True with its first sector and length.
+bool gptPartition(u64 lba, u64& first, u64& count) {
+    u8 h[SECTOR];
+    if (not disk.read(lba, h) or memcmp(h, "EFI PART", 8) != 0)
+        return false;
+    u32 size = get32(h + 12);
+    if (size < 92 or size > SECTOR)
+        return false;
+    u32 stored = get32(h + 16);
+    put32(h + 16, 0);
+    if (crc32(h, size) != stored or get64(h + 24) != lba)
+        return false;
+    u64 firstUsable = get64(h + 40), lastUsable = get64(h + 48), entries = get64(h + 72);
+    u32 n = get32(h + 80), entrySize = get32(h + 84), entriesCrc = get32(h + 88);
+    if (entrySize < 128 or SECTOR % entrySize or n == 0 or n > 1024 or firstUsable > lastUsable or
+        lastUsable >= disk.sectors())
+        return false;
+    u64 bytes = u64{n} * entrySize, sectors = (bytes + SECTOR - 1) / SECTOR;
+    if (entries < 2 or entries + sectors > disk.sectors())
+        return false;
+    u32 crc = 0;
+    bool found = false;
+    for (u64 i = 0; i < sectors; i++) {
+        u8 s[SECTOR];
+        if (not disk.read(entries + i, s))
+            return false;
+        u64 here = bytes - i * SECTOR < SECTOR ? bytes - i * SECTOR : SECTOR;
+        crc = crc32(s, here, crc);
+        for (u64 at = 0; at + entrySize <= here and not found; at += entrySize) {
+            if (memcmp(s + at, DATA_PARTITION, 16) != 0)
+                continue;
+            u64 start = get64(s + at + 32), last = get64(s + at + 40);
+            if (start < firstUsable or last > lastUsable or last < start)
+                return false;
+            first = start;
+            count = last - start + 1;
+            found = true;
+        }
+    }
+    return found and crc == entriesCrc;
+}
+
 class Volume {
 public:
     bool mount() {
         u8 boot[SECTOR];
         if (not disk.read(0, boot))
             return false;
+        u64 end = disk.sectors(); // where the volume must stop
         if (not isFat32(boot)) {
-            // Maybe partitioned: try the first MBR partition.
             if (get16(boot + 510) != 0xAA55)
                 return false;
-            _base = get32(boot + 446 + 8);
+            if (boot[446 + 4] == 0xEE) {
+                // A protective MBR: the disk has a GPT. Use its Bhairav data
+                // partition (never the EFI System Partition), through the
+                // primary header or, if that's damaged, the backup.
+                u64 count = 0;
+                if (not gptPartition(1, _base, count) and not gptPartition(disk.sectors() - 1, _base, count)) {
+                    log("the disk's GPT is damaged or has no Bhairav data partition");
+                    return false;
+                }
+                end = _base + count;
+            } else {
+                // Maybe partitioned: try the first MBR partition.
+                _base = get32(boot + 446 + 8);
+            }
             if (not _base or not disk.read(_base, boot) or not isFat32(boot))
                 return false;
         }
@@ -333,6 +410,10 @@ public:
         u32 reserved = get16(boot + 14);
         u32 fats = boot[16];
         u32 total = get16(boot + 19) ? get16(boot + 19) : get32(boot + 32);
+        if (_base + total > end) {
+            log("the FAT32 volume claims more sectors than its partition or disk has");
+            return false;
+        }
         _fatSize = get32(boot + 36);
         _root = get32(boot + 44);
         _fsInfo = get16(boot + 48);

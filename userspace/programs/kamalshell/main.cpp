@@ -226,9 +226,12 @@ public:
             filesTheirs.release();
             _filesOk = _files.connect(filesMine.release());
         }
+        _mode = info.bootMode;
         rescanApps();
         damage(_screen.bounds());
         flush();
+        if (_mode == Sys::BOOT_RECOVERY)
+            launch("terminal"); // where the repair tools are (apt verify, apt install)
         return true;
     }
 
@@ -273,7 +276,7 @@ private:
         for (int j = 0; j < _installedCount; j++)
             _installed[j] = Installed{};
         _installedCount = 0;
-        if (_filesOk) {
+        if (_filesOk and _mode == Sys::BOOT_NORMAL) { // (safe and recovery modes: no third-party code)
             static AppInfo infos[MAX_INSTALLED];
             long n = listApps(_files, infos, MAX_INSTALLED);
             for (long j = 0; j < n; j++) {
@@ -300,6 +303,8 @@ private:
     long startInstalled(char const* id, Sys::Handle const* give, unsigned long count) {
         if (not _filesOk)
             return Sys::NOT_FOUND;
+        if (_mode != Sys::BOOT_NORMAL)
+            return Sys::ACCESS_DENIED; // safe and recovery modes run no third-party code
         Package package;
         unsigned long length = 0;
         char const* why = "";
@@ -1265,6 +1270,10 @@ private:
             char const* name = k >= 0 ? APPS[k].name : j >= 0 ? _installed[j].info.title : w.title;
             c.text({lotus.right() + 12, textY}, name, Theme::TEXT, font);
         }
+        if (_mode != Sys::BOOT_NORMAL) // (so a reduced system is never mistaken for the normal one)
+            c.text({_screen.width / 2 - 90, textY},
+                   _mode == Sys::BOOT_SAFE ? "Safe mode: no network, no installed apps" : "Recovery mode", Theme::TEXT,
+                   bold);
 
         // Right side: network, then date and time.
         Sys::SystemInfo info;
@@ -1530,6 +1539,7 @@ private:
     Net _net;
     Files _files;
     bool _netOk = false, _netUp = false, _filesOk = false;
+    unsigned long _mode = Sys::BOOT_NORMAL; // the boot mode (SystemInfo.bootMode)
     unsigned _netAddress = 0;
 
     unsigned long _clockSecond = 0, _clockMinute = 0;

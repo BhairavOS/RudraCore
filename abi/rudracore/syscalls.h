@@ -198,6 +198,13 @@ struct SystemInfo {
 
     unsigned long timeOfDay; // seconds since midnight, from the hardware clock (UTC)
     unsigned long unixTime;  // seconds since 1970-01-01 (UTC)
+
+    unsigned long bootMode; // BOOT_NORMAL, BOOT_SAFE or BOOT_RECOVERY: the boot entry chosen
 };
+
+// SystemInfo.bootMode. Safe: the known-good minimum (no network, no
+// third-party apps, no self-tests). Recovery: repair (no third-party apps,
+// network on, a Terminal opens).
+constexpr unsigned long BOOT_NORMAL = 0, BOOT_SAFE = 1, BOOT_RECOVERY = 2;
 
 } // namespace Rudracore::Abi

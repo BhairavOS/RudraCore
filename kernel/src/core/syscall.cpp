@@ -342,6 +342,7 @@ Arch::Frame* sysSystemInfo(Call const& c, Boot::Info const& boot) {
     info.taskCount = Sched::taskCount();
     info.timeOfDay = Time::timeOfDay();
     info.unixTime = Time::unixTime();
+    info.bootMode = boot.mode;
     if (boot.hasFramebuffer) {
         auto const& fb = boot.framebuffer;
         info.screenWidth = fb.width;

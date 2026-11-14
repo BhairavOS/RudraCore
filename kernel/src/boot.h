@@ -59,6 +59,7 @@ struct Info {
     bool verifiedBoot; // every boot file came from a signed list (ShoolLoader)
     bool secureBoot;   // UEFI Secure Boot was on
     bool diagnostic;   // diagnostic boot: log everything about the boot
+    u64 mode;          // Abi::BOOT_NORMAL/SAFE/RECOVERY (ShoolLoader's entry, or Limine's "mode=" cmdline)
     usize memoryFixes; // memory map problems validation repaired
 
     bool hasFramebuffer;

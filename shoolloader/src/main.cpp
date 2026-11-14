@@ -59,41 +59,74 @@ void printFileSize(FileData const& file) {
     printSize(file.size);
 }
 
-} // namespace
+// An entry can start only if its kernel is in the signed list (an entry
+// for a kernel this image doesn't ship, such as a previous kernel, is
+// left out of the menu and skipped as a fallback).
+bool usable(Entry const& e) { return isListed(e.kernel); }
 
-extern "C" Efi::Status efiMain(Efi::Handle image, Efi::SystemTable* systemTable) {
-    system = systemTable;
-    bootServices = systemTable->bootServices;
-    imageHandle = image;
+// The menu: the default starts after `timeout` seconds; a key stops the
+// countdown. 1-9 picks an entry, Enter the default, D adds diagnostics.
+uint32_t chooseEntry(Config const& config, bool& diagnostic) {
+    uint32_t shown[Config::MAX_ENTRIES];
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < config.entryCount; i++) {
+        if (usable(config.entries[i]))
+            shown[count++] = i;
+    }
+    if (count == 0)
+        fail("no entry's kernel is in the signed list");
+    uint32_t choice = usable(config.entries[config.defaultEntry]) ? config.defaultEntry : shown[0];
+    if (config.timeout == 0 or count < 2)
+        return choice;
 
-    bootServices->setWatchdogTimer(0, 0, 0, nullptr); // no reset if loading takes a while
-    system->conOut->clearScreen(system->conOut);
-    print("ShoolLoader ");
-    print(VERSION);
-    print(" - Trident of System Awakening\n\n");
-    bool diagnostic = diagnosticKey();
+    print("\n");
+    for (uint32_t n = 0; n < count; n++) {
+        char number[] = {' ', ' ', ' ', ' ', static_cast<char>('1' + n), ' ', ' ', '\0'};
+        print(number);
+        print(config.entries[shown[n]].title);
+        print(shown[n] == choice ? "   (default)\n" : "\n");
+    }
+    print("\n  1-");
+    printNumber(count);
+    print(" chooses, Enter starts the default, D adds diagnostics. The default starts in ");
+    printNumber(config.timeout);
+    print(" s.\n");
+    bool stopped = false;
+    for (uint64_t tick = 0; stopped or tick < config.timeout * 20ull; tick++) {
+        Efi::Char16 key = pendingKey();
+        if (key == 0) {
+            bootServices->stall(50 * 1000);
+            continue;
+        }
+        stopped = true;
+        if (key == u'\r' or key == u'\n')
+            break;
+        if (key == u'd' or key == u'D') {
+            diagnostic = true;
+            print("  diagnostics on\n");
+        } else if (key >= u'1' and key < static_cast<Efi::Char16>(u'1' + count)) {
+            choice = shown[key - u'1'];
+            break;
+        }
+    }
+    return choice;
+}
 
-    // Secure Boot: when on, the firmware checked this loader's signature
-    // before starting it, so the chain of trust starts in the firmware.
-    bool secureBoot = globalFlag(u"SecureBoot") == 1 and globalFlag(u"SetupMode") != 1;
-    print(secureBoot ? "  Secure Boot on: this loader's signature was checked by the firmware\n"
-                     : "  Secure Boot off: nothing checked this loader\n");
-
-    Efi::File* root = openBootVolume();
-    loadBootManifest(root); // every file read below must be in its signed list
-    Config config = readConfig(root);
-    diagnostic = diagnostic or config.diagnostic;
-    if (diagnostic)
-        print("  diagnostic boot: every step is shown, and the loader waits before handing over\n");
+// Loads and starts one entry. Any failure fail()s, which (while the
+// fallback is armed) comes back to efiMain to try the entry's fallback.
+[[noreturn]] void bootEntry(Efi::File* root, Config const& config, Entry const& e, bool secureBoot, bool diagnostic) {
+    print("\n  starting: ");
+    print(e.title);
+    print("\n");
 
     // The kernel.
     FileData kernelFile;
-    if (not readFile(root, config.kernel, Efi::LOADER_DATA, kernelFile))
-        fail("can't read the kernel (check 'kernel =' in /boot/shool.cfg)");
-    verifyFile(config.kernel, kernelFile);
+    if (not readFile(root, e.kernel, Efi::LOADER_DATA, kernelFile))
+        fail("can't read the kernel");
+    verifyFile(e.kernel, kernelFile);
     Kernel kernel = loadKernel(kernelFile);
     print("  kernel  ");
-    print(config.kernel);
+    print(e.kernel);
     printFileSize(kernelFile);
     print(diagnostic ? ", signed hash ok, ELF ok, protocol ok\n" : "\n");
 
@@ -106,6 +139,7 @@ extern "C" Efi::Status efiMain(Efi::Handle image, Efi::SystemTable* systemTable)
     copyName(info->loaderVersion, sizeof(info->loaderVersion), VERSION);
     info->flags = Shool::FLAG_VERIFIED_BOOT | (secureBoot ? Shool::FLAG_SECURE_BOOT : 0) |
                   (diagnostic ? Shool::FLAG_DIAGNOSTIC : 0);
+    info->mode = e.mode;
     info->hhdmOffset = Shool::HHDM_OFFSET;
     info->kernelPhysical = kernel.physical;
     info->kernelVirtual = kernel.virtualBase;
@@ -113,25 +147,32 @@ extern "C" Efi::Status efiMain(Efi::Handle image, Efi::SystemTable* systemTable)
 
     // The programs that ship with the kernel. Loaded as kernel memory, so
     // they stay valid after the kernel reclaims loader memory. A missing
-    // one stops the boot: the signed configuration names it.
-    for (uint32_t i = 0; i < config.moduleCount; i++) {
+    // one stops this entry: the signed configuration names it.
+    for (uint32_t i = 0; i < e.moduleCount; i++) {
         FileData module;
-        if (not readFile(root, config.modules[i], Efi::SHOOL_KERNEL, module)) {
+        if (not readFile(root, e.modules[i], Efi::SHOOL_KERNEL, module)) {
             print("  ");
-            print(config.modules[i]);
+            print(e.modules[i]);
             print(":\n");
             fail("a boot file named in shool.cfg is missing");
         }
-        verifyFile(config.modules[i], module);
-        checkModule(config.modules[i], module);
+        verifyFile(e.modules[i], module);
+        checkModule(e.modules[i], module);
         auto& entry = info->modules[info->moduleCount++];
         entry.physical = reinterpret_cast<uint64_t>(module.data);
         entry.size = module.size;
-        baseName(entry.name, sizeof(entry.name), config.modules[i]);
-        print("  module  ");
-        print(config.modules[i]);
-        printFileSize(module);
-        print(diagnostic ? ", signed hash ok\n" : "\n");
+        baseName(entry.name, sizeof(entry.name), e.modules[i]);
+        if (diagnostic) {
+            print("  module  ");
+            print(e.modules[i]);
+            printFileSize(module);
+            print(", signed hash ok\n");
+        }
+    }
+    if (not diagnostic) {
+        print("  ");
+        printNumber(e.moduleCount);
+        print(" modules, every hash checked\n");
     }
 
     print("\nawakening RudraCore...\n");
@@ -158,6 +199,55 @@ extern "C" Efi::Status efiMain(Efi::Handle image, Efi::SystemTable* systemTable)
         bootServices->stall(400 * 1000); // let the trident be seen
     }
 
+    disarmFallback(); // past here, a failure goes back to the firmware
     exitBootServices(*info);
     enterKernel(pml4, Shool::HHDM_OFFSET + stack + STACK_PAGES * PAGE_SIZE, kernel.entry, directMap(info));
+}
+
+} // namespace
+
+extern "C" Efi::Status efiMain(Efi::Handle image, Efi::SystemTable* systemTable) {
+    system = systemTable;
+    bootServices = systemTable->bootServices;
+    imageHandle = image;
+
+    bootServices->setWatchdogTimer(0, 0, 0, nullptr); // no reset if loading takes a while
+    system->conOut->clearScreen(system->conOut);
+    print("ShoolLoader ");
+    print(VERSION);
+    print(" - Trident of System Awakening\n\n");
+    static bool diagnostic; // (static: kept across the fallback jump)
+    diagnostic = diagnosticKey();
+
+    // Secure Boot: when on, the firmware checked this loader's signature
+    // before starting it, so the chain of trust starts in the firmware.
+    bool secureBoot = globalFlag(u"SecureBoot") == 1 and globalFlag(u"SetupMode") != 1;
+    print(secureBoot ? "  Secure Boot on: this loader's signature was checked by the firmware\n"
+                     : "  Secure Boot off: nothing checked this loader\n");
+
+    Efi::File* root = openBootVolume();
+    loadBootManifest(root); // every file read below must be in its signed list
+    Config const& config = readConfig(root);
+
+    // Kernel fallback: when an entry fails to load (a missing or changed
+    // file, a bad ELF, a protocol mismatch), fail() comes back here and the
+    // entry's `fallback` is tried, each entry at most once.
+    static uint32_t index;
+    static bool tried[Config::MAX_ENTRIES];
+    index = chooseEntry(config, diagnostic);
+    if (__builtin_setjmp(fallbackPoint)) {
+        int next = config.entries[index].fallback;
+        for (uint32_t steps = 0; next >= 0 and (tried[next] or not usable(config.entries[next])) and
+                                 steps < Config::MAX_ENTRIES;
+             steps++)
+            next = config.entries[next].fallback;
+        if (next < 0 or tried[next] or not usable(config.entries[next]))
+            fail("this entry failed and has no fallback left to try");
+        print("  trying its fallback instead\n");
+        index = static_cast<uint32_t>(next);
+    }
+    tried[index] = true;
+    armFallback();
+    Entry const& e = config.entries[index];
+    bootEntry(root, config, e, secureBoot, diagnostic or e.diagnostic);
 }

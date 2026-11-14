@@ -34,7 +34,15 @@ constexpr uint64_t HHDM_OFFSET = 0xffff800000000000;
 // take its VERSION, and the kernel checks BootInfo.version and .size again.
 //   1: first version
 //   2: BootInfo.flags (verified boot, Secure Boot, diagnostic mode)
-constexpr uint32_t VERSION = 2;
+//   3: BootInfo.mode (normal, safe, recovery)
+constexpr uint32_t VERSION = 3;
+
+// What the chosen boot entry asks of the system (BootInfo.mode).
+enum BootMode : uint32_t {
+    MODE_NORMAL = 0,
+    MODE_SAFE = 1,     // known-good minimum: no network, no third-party apps, no self-tests
+    MODE_RECOVERY = 2, // repair: no third-party apps, network on, a Terminal opens
+};
 
 // Placed in the kernel image (8-byte aligned, in a loaded segment), where
 // ShoolLoader finds it by scanning the kernel file.
@@ -101,7 +109,7 @@ struct BootInfo {
     char loaderVersion[16];
 
     uint32_t flags; // Flags
-    uint32_t reserved;
+    uint32_t mode;  // BootMode
 
     uint64_t hhdmOffset;
     uint64_t kernelPhysical; // where the kernel's lowest segment was loaded

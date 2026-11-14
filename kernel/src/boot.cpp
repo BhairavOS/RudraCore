@@ -82,6 +82,13 @@ volatile limine_rsdp_request rsdpRequest = {
     .response = nullptr,
 };
 
+[[gnu::used, gnu::section(".limine_requests")]]
+volatile limine_executable_cmdline_request cmdlineRequest = {
+    .id = LIMINE_EXECUTABLE_CMDLINE_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr,
+};
+
 [[gnu::used, gnu::section(".limine_requests_end")]]
 volatile u64 requestsEnd[] = LIMINE_REQUESTS_END_MARKER;
 
@@ -165,6 +172,7 @@ void collectFromShool(Shool::BootInfo const& boot) {
     info.verifiedBoot = boot.flags & Shool::FLAG_VERIFIED_BOOT;
     info.secureBoot = boot.flags & Shool::FLAG_SECURE_BOOT;
     info.diagnostic = boot.flags & Shool::FLAG_DIAGNOSTIC;
+    info.mode = boot.mode <= Shool::MODE_RECOVERY ? boot.mode : Shool::MODE_SAFE; // (unknown: the careful choice)
     info.hhdmOffset = boot.hhdmOffset;
     info.kernelPhysicalBase = boot.kernelPhysical;
     info.kernelVirtualBase = boot.kernelVirtual;
@@ -243,8 +251,9 @@ void validateRegions(Info& info) {
     info.regionCount = kept;
 
     // Allocatable memory may overlap nothing: cut the overlap out of it (of
-    // two allocatable regions, out of the later one), keeping the larger
-    // side when the other region sits in the middle. Each cut shrinks a
+    // two allocatable regions, out of the later one). When the other region
+    // sits in the middle, the part after it becomes a new region (or, with
+    // the table full, the smaller side is dropped). Each cut shrinks a
     // region, so this ends.
     for (bool changed = true; changed;) {
         changed = false;
@@ -262,7 +271,10 @@ void validateRegions(Info& info) {
                 u64 before = b.base > a.base ? alignDown(b.base) - a.base : 0;
                 u64 afterStart = alignUp(bEnd);
                 u64 after = aEnd > afterStart ? aEnd - afterStart : 0;
-                if (before >= after) {
+                if (before and after and info.regionCount < Info::MAX_REGIONS) {
+                    info.regions[info.regionCount++] = {afterStart, after, a.type};
+                    a.length = before;
+                } else if (before >= after) {
                     a.length = before;
                 } else {
                     a.base = afterStart;
@@ -308,11 +320,41 @@ void validate() {
     if (not usable)
         return refuse("no usable memory");
 
+    // Modules are read long after boot memory is reclaimed. Limine puts them
+    // in bootloader-reclaimable memory: mark their pages kernel memory, so
+    // the cut above keeps them out of what gets reclaimed.
+    bool marked = false;
+    for (usize i = 0; i < info.moduleCount; i++) {
+        Module const& m = info.modules[i];
+        u64 physical = reinterpret_cast<u64>(m.data) - info.hhdmOffset;
+        if (reinterpret_cast<u64>(m.data) < info.hhdmOffset or inKernelMemory(physical, m.size) or
+            info.regionCount == Info::MAX_REGIONS)
+            continue;
+        for (usize r = 0; r < info.regionCount; r++) {
+            Region const& region = info.regions[r];
+            if (region.type == RegionType::BootloaderReclaimable and physical >= region.base and
+                physical - region.base <= region.length and m.size <= region.length - (physical - region.base)) {
+                u64 start = alignDown(physical);
+                info.regions[info.regionCount++] = {start, alignUp(physical + m.size) - start, RegionType::Kernel};
+                marked = true;
+                break;
+            }
+        }
+    }
+    if (marked) {
+        usize fixes = info.memoryFixes;
+        validateRegions(info);
+        info.memoryFixes = fixes; // (expected with Limine, not a problem)
+    }
+
     for (usize i = 0; i < info.moduleCount; i++) {
         Module const& m = info.modules[i];
         u64 physical = reinterpret_cast<u64>(m.data) - info.hhdmOffset;
         if (reinterpret_cast<u64>(m.data) < info.hhdmOffset or not inKernelMemory(physical, m.size)) {
-            log("[boot] module ", m.name, " isn't in kernel memory");
+            log("[boot] module ", m.name, " at ", Hex{physical}, " (", m.size, " bytes) isn't in kernel memory");
+            for (usize r = 0; r < info.regionCount; r++)
+                log("[boot]   ", Hex{info.regions[r].base}, " ", info.regions[r].length, " ",
+                    regionTypeName(info.regions[r].type));
             return refuse("a module could be overwritten");
         }
     }
@@ -335,7 +377,7 @@ bool selfTest() {
     constexpr auto U = RegionType::Usable, K = RegionType::Kernel, R = RegionType::Reserved,
                    B = RegionType::BootloaderReclaimable;
     Region const broken[] = {
-        {0x1000, 0xF000, U},              // a kernel region in the middle: keeps the lower part
+        {0x1000, 0xF000, U},              // a kernel region in the middle: split in two
         {0x8000, 0x1000, K},
         {0x20010, 0x10000, U},            // unaligned: shrinks to whole pages
         {0x40000, 0x10000, U},            // the reserved region covers its start
@@ -353,6 +395,7 @@ bool selfTest() {
     Region const expected[] = {
         {0x1000, 0x7000, U}, {0x8000, 0x1000, K}, {0x21000, 0xF000, U}, {0x42000, 0xE000, U},
         {0x3F800, 0x2000, R}, {0x60000, 0x8000, U}, {0x68000, 0x4000, B},
+        {0x9000, 0x7000, U}, // the part of the first region after the kernel region
     };
     if (t.regionCount != sizeof(expected) / sizeof(expected[0]))
         return false;
@@ -436,6 +479,23 @@ Info const& collect(u64 magic, u64 shoolInfo) {
         // Physical or direct-mapped, depending on the protocol revision.
         u64 address = reinterpret_cast<u64>(res->address);
         info.acpiRsdp = address >= info.hhdmOffset ? address - info.hhdmOffset : address;
+    }
+
+    // limine.conf's "cmdline: mode=safe" (or mode=recovery) picks the mode.
+    if (auto* res = cmdlineRequest.response; res and res->cmdline) {
+        char const* c = res->cmdline;
+        for (usize i = 0; c[i] and i < 256; i++) {
+            auto is = [&](char const* word) {
+                usize n = 0;
+                while (word[n] and c[i + n] == word[n])
+                    n++;
+                return not word[n] and (c[i + n] == '\0' or c[i + n] == ' ');
+            };
+            if ((i == 0 or c[i - 1] == ' ') and is("mode=safe"))
+                info.mode = Shool::MODE_SAFE;
+            else if ((i == 0 or c[i - 1] == ' ') and is("mode=recovery"))
+                info.mode = Shool::MODE_RECOVERY;
+        }
     }
 
     if (info.protocolSupported)

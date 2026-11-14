@@ -72,6 +72,15 @@ public:
         _filesOk = _files.connect(2);
         _netOk = _net.connect(3);
         print("Bhairav OS terminal. Type \"help\" to see the commands.", GOOD);
+        Sys::SystemInfo system;
+        Sys::systemInfo(system);
+        if (system.bootMode == Sys::BOOT_RECOVERY) {
+            print("Recovery mode: installed apps don't run. To repair:", ERROR);
+            print("  apt verify            check every installed app");
+            print("  apt install <app>     reinstall one from its signed source (apt update first for repositories)");
+            print("  apt remove <app>      or remove it");
+            print("Then restart and choose the normal entry.");
+        }
         print("");
         redraw();
         return true;
