@@ -24,6 +24,8 @@ SECTIONS
         KEEP(*(.limine_requests))
         KEEP(*(.limine_requests_end))
         __requests_end = .;
+        . = ALIGN(8);
+        KEEP(*(.shool_kernel)) /* the Shool::KernelHeader ShoolLoader looks for */
     } :limine_requests
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));

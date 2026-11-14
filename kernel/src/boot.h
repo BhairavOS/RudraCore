@@ -52,9 +52,14 @@ struct Info {
     static constexpr usize MAX_REGIONS = 256;
     static constexpr usize MAX_MODULES = 32;
 
-    bool protocolSupported;
+    bool protocolSupported; // false: unusable (an unknown protocol, or it failed validation)
     char loaderName[64];
     char loaderVersion[64];
+
+    bool verifiedBoot; // every boot file came from a signed list (ShoolLoader)
+    bool secureBoot;   // UEFI Secure Boot was on
+    bool diagnostic;   // diagnostic boot: log everything about the boot
+    usize memoryFixes; // memory map problems validation repaired
 
     bool hasFramebuffer;
     Framebuffer framebuffer;
@@ -75,6 +80,17 @@ struct Info {
 // Reads the boot information from whichever bootloader started the kernel.
 // ShoolLoader passes (Shool::MAGIC, BootInfo*) in rdi/rsi; anything else
 // means Limine, which answers the requests embedded in the kernel image.
+//
+// Then validates it, trusting neither loader: regions that wrap or are
+// empty are dropped, usable ones are page-aligned, and usable memory that
+// overlaps anything else is cut away (so the kernel never hands out memory
+// that holds itself, a module or firmware data). Modules must lie inside
+// kernel memory and the framebuffer must make sense. Problems it can't
+// repair clear protocolSupported (and are logged).
 Info const& collect(u64 magic, u64 shoolInfo);
+
+// Runs the memory map repair on a deliberately broken map and checks the
+// result. True if it came out right.
+bool selfTest();
 
 } // namespace Rudracore::Boot

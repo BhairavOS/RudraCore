@@ -7,6 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         clang lld llvm make nasm xorriso mtools git ca-certificates \
         qemu-system-x86 ovmf console-setup-linux gzip imagemagick \
+        sbsigntool python3-virt-firmware \
     && rm -rf /var/lib/apt/lists/*
 
 # Limine: temporary bootloader until ShoolLoader is ready.

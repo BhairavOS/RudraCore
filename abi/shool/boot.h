@@ -26,8 +26,31 @@
 namespace Shool {
 
 constexpr uint64_t MAGIC = 0x44414f4c4f4f4853; // "SHOOLOAD" in memory
-constexpr uint32_t VERSION = 1;
 constexpr uint64_t HHDM_OFFSET = 0xffff800000000000;
+
+// Versioning: VERSION changes whenever BootInfo's layout or meaning does.
+// The kernel says which versions it takes in a KernelHeader in its image;
+// ShoolLoader refuses (on screen, before handing over) a kernel that can't
+// take its VERSION, and the kernel checks BootInfo.version and .size again.
+//   1: first version
+//   2: BootInfo.flags (verified boot, Secure Boot, diagnostic mode)
+constexpr uint32_t VERSION = 2;
+
+// Placed in the kernel image (8-byte aligned, in a loaded segment), where
+// ShoolLoader finds it by scanning the kernel file.
+struct KernelHeader {
+    uint64_t magic; // KERNEL_MAGIC
+    uint64_t check; // ~KERNEL_MAGIC (so a stray copy of the magic isn't taken for one)
+    uint32_t minVersion;
+    uint32_t maxVersion;
+};
+constexpr uint64_t KERNEL_MAGIC = 0x4e524b4c4f4f4853; // "SHOOLKRN" in memory
+
+enum Flags : uint32_t {
+    FLAG_VERIFIED_BOOT = 1 << 0, // every file came from the signed list (shool.sum)
+    FLAG_SECURE_BOOT = 1 << 1,   // UEFI Secure Boot was on (so the loader itself was checked)
+    FLAG_DIAGNOSTIC = 1 << 2,    // diagnostic boot: log everything about the boot
+};
 
 enum RegionType : uint32_t {
     REGION_USABLE = 0,
@@ -77,6 +100,9 @@ struct BootInfo {
     char loaderName[32];
     char loaderVersion[16];
 
+    uint32_t flags; // Flags
+    uint32_t reserved;
+
     uint64_t hhdmOffset;
     uint64_t kernelPhysical; // where the kernel's lowest segment was loaded
     uint64_t kernelVirtual;  // its virtual address
@@ -94,6 +120,7 @@ struct BootInfo {
 static_assert(sizeof(MemoryRegion) == 24);
 static_assert(sizeof(Framebuffer) == 40);
 static_assert(sizeof(Module) == 48);
-static_assert(sizeof(BootInfo) == 16 + 48 + 32 + 40 + 8 + 24 * 256 + 8 + 48 * 32);
+static_assert(sizeof(KernelHeader) == 24);
+static_assert(sizeof(BootInfo) == 16 + 48 + 8 + 32 + 40 + 8 + 24 * 256 + 8 + 48 * 32);
 
 } // namespace Shool

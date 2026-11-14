@@ -100,6 +100,15 @@ BOOT_KEY ?= keys/boot-signing.pem
 BOOT_VERSION ?= 1
 SIGNED_BOOT := $(BOOT_FILES)/shool.cfg $(BOOT_FILES)/shool.sum $(BOOT_FILES)/shool.sig
 
+# UEFI Secure Boot: BOOTX64.EFI (ShoolLoader) is signed with this db key
+# (RSA, Authenticode, by sbsign), made the first time with a self-signed
+# certificate. Enroll build/secureboot.cer in the firmware's db (its setup
+# screen, or `make secure-boot-vars` for QEMU) and the firmware will only
+# start this loader, which then only boots signed files: the whole chain.
+SB_KEY ?= keys/secureboot.key
+SB_CERT ?= keys/secureboot.crt
+SIGNED_EFI := $(BUILD)/BOOTX64.EFI
+
 # More package/repository keys to trust besides SIGNING_KEY's: public keys
 # (PEM) in keys/trusted/. Put the old key's public half there when rotating
 # to a new SIGNING_KEY; delete it to revoke a key. At most 15.
@@ -132,7 +141,8 @@ QEMU_FLAGS := -M q35 -m 256M -cdrom $(ISO) -boot d \
 	-drive file=$(DISK),format=raw,if=none,id=disk -device ide-hd,drive=disk,bus=ide.0 \
 	-netdev user,id=net -device $(NIC),netdev=net
 
-.PHONY: all kernel user shool iso disk packages repo serve-repo install-app run run-uefi shot clean FORCE
+.PHONY: all kernel user shool iso disk packages repo serve-repo install-app run run-uefi run-secureboot \
+	secure-boot-vars shot clean FORCE
 
 all: iso $(DISK)
 
@@ -221,6 +231,27 @@ $(BUILD)/boot-key.h: $(BOOT_KEY)
 
 $(SHOOL_EFI): $(SHOOL_OBJS)
 	lld-link /nologo /subsystem:efi_application /entry:efiMain /nodefaultlib /out:$@ $^
+
+$(SB_CERT):
+	@mkdir -p $(@D)
+	(umask 077 && openssl req -new -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
+		-subj "/CN=Bhairav OS Secure Boot db/" -keyout $(SB_KEY) -out $@ 2>/dev/null)
+	@echo "made a new Secure Boot key: $(SB_KEY) and $@ (keep the key private)"
+
+$(SIGNED_EFI): $(SHOOL_EFI) $(SB_CERT)
+	sbsign --key $(SB_KEY) --cert $(SB_CERT) --output $@ $< 2>/dev/null
+
+# The certificate to enroll in a firmware's db (DER, as setup screens want).
+$(BUILD)/secureboot.cer: $(SB_CERT)
+	openssl x509 -in $< -outform DER -out $@
+
+# OVMF variables with Secure Boot on and only our certificate enrolled (PK,
+# KEK and db), for `make run-secureboot` and tests.
+secure-boot-vars: $(BUILD)/ovmf-vars-secureboot.fd
+
+$(BUILD)/ovmf-vars-secureboot.fd: $(SB_CERT)
+	virt-fw-vars --input /usr/share/OVMF/OVMF_VARS_4M.fd --output $@ \
+		--enroll-cert $(SB_CERT) --no-microsoft --secure-boot >/dev/null
 
 $(BOOT_FILES)/rudracore.elf: $(KERNEL)
 	@mkdir -p $(@D)
@@ -356,12 +387,12 @@ $(BOOT_FILES)/%.elf: $(BUILD)/user/%.elf
 	@mkdir -p $(@D)
 	llvm-strip -o $@ $<
 
-$(EFI_IMG): $(SHOOL_EFI) $(STRIPPED) $(SIGNED_BOOT)
+$(EFI_IMG): $(SIGNED_EFI) $(BUILD)/secureboot.cer $(STRIPPED) $(SIGNED_BOOT)
 	rm -f $@
 	dd if=/dev/zero of=$@ bs=1M count=16 status=none
 	mformat -i $@ -T 32768 -h 64 -s 32 -v BHAIRAV ::
 	mmd -i $@ ::/EFI ::/EFI/BOOT ::/boot
-	mcopy -i $@ $(SHOOL_EFI) ::/EFI/BOOT/BOOTX64.EFI
+	mcopy -i $@ $(SIGNED_EFI) ::/EFI/BOOT/BOOTX64.EFI
 	mcopy -i $@ $(STRIPPED) $(SIGNED_BOOT) ::/boot/
 
 # A blank FAT32 volume (no partition table) with a welcome file.
@@ -396,6 +427,13 @@ run: $(ISO) $(DISK)
 
 run-uefi: $(ISO) $(DISK)
 	qemu-system-x86_64 $(QEMU_FLAGS) -bios $(OVMF) -nographic
+
+# UEFI with Secure Boot on (OVMF's Secure Boot build, which needs SMM) and
+# only our key enrolled: the firmware checks ShoolLoader's signature.
+run-secureboot: $(ISO) $(DISK) $(BUILD)/ovmf-vars-secureboot.fd
+	qemu-system-x86_64 $(QEMU_FLAGS) -machine smm=on -global driver=cfi.pflash01,property=secure,value=on \
+		-drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd \
+		-drive if=pflash,format=raw,unit=1,file=$(BUILD)/ovmf-vars-secureboot.fd -nographic
 
 # Boots headless, saves the screen to build/screen.png and the serial log to
 # build/serial.log. Set FIRMWARE=uefi to boot through UEFI instead of BIOS.

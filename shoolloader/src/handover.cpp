@@ -204,7 +204,60 @@ void setupCpu() {
     asm volatile("mov %0, %%cr0" : : "r"(cr0 | CR0_WP));
 }
 
+// Where `virt` leads in the page tables at `pml4`, or ~0 if unmapped.
+uint64_t translate(uint64_t pml4, uint64_t virt) {
+    auto* table = reinterpret_cast<uint64_t*>(pml4);
+    for (int level = 3; level >= 0; level--) {
+        uint64_t e = table[PageTables::index(virt, level)];
+        if (not(e & PRESENT))
+            return ~0ull;
+        if (level == 1 and (e & HUGE))
+            return (e & ADDRESS_MASK & ~(SIZE_2M - 1)) + (virt & (SIZE_2M - 1));
+        if (level == 0)
+            return (e & ADDRESS_MASK) + (virt & (PAGE_SIZE - 1));
+        table = reinterpret_cast<uint64_t*>(e & ADDRESS_MASK);
+    }
+    return ~0ull;
+}
+
+void expectMapped(uint64_t pml4, uint64_t virt, uint64_t physical, char const* what) {
+    if (translate(pml4, virt) != physical) {
+        print("  not mapped as promised: ");
+        print(what);
+        print("\n");
+        fail("the kernel's first page tables are wrong");
+    }
+}
+
 } // namespace
+
+void checkHandover(uint64_t pml4, Kernel const& kernel, uint64_t stack, uint64_t stackSize, Shool::BootInfo const* info) {
+    uint32_t a, b, c, d;
+    cpuid(0x80000000, a, b, c, d);
+    uint32_t highest = a;
+    cpuid(0x80000001, a, b, c, d);
+    if (highest < 0x80000001 or not(d & (1 << 20)))
+        fail("this CPU has no no-execute (NX) bit, which RudraCore needs");
+
+    // Everything the jump and the kernel's first instructions rely on.
+    for (uint64_t offset = 0; offset < kernel.size; offset += PAGE_SIZE)
+        expectMapped(pml4, kernel.virtualBase + offset, kernel.physical + offset, "the kernel image");
+    expectMapped(pml4, kernel.entry, kernel.physical + (kernel.entry - kernel.virtualBase), "the kernel's entry point");
+    for (uint64_t offset = 0; offset < stackSize; offset += PAGE_SIZE)
+        expectMapped(pml4, Shool::HHDM_OFFSET + stack + offset, stack + offset, "the kernel's stack");
+    auto infoPhysical = reinterpret_cast<uint64_t>(info);
+    expectMapped(pml4, Shool::HHDM_OFFSET + infoPhysical, infoPhysical, "the boot information");
+    expectMapped(pml4, Shool::HHDM_OFFSET + infoPhysical + sizeof(*info) - 1, infoPhysical + sizeof(*info) - 1,
+                 "the end of the boot information");
+    // The code switching CR3 keeps running at its own (identity) address.
+    auto self = reinterpret_cast<uint64_t>(&enterKernel);
+    expectMapped(pml4, self, self, "the loader's hand-over code");
+    for (uint32_t i = 0; i < info->moduleCount; i++)
+        expectMapped(pml4, Shool::HHDM_OFFSET + info->modules[i].physical, info->modules[i].physical, "a module");
+    auto const& fb = info->framebuffer;
+    if (fb.physical)
+        expectMapped(pml4, Shool::HHDM_OFFSET + fb.physical, fb.physical, "the framebuffer");
+}
 
 uint64_t buildPageTables(Kernel const& kernel, Shool::Framebuffer const& fb) {
     MemoryMap map;

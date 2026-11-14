@@ -4,12 +4,23 @@
 
 #include "boot.h"
 
+#include "log.h"
+
 #include <limine.h>
 #include <shool/boot.h>
 
 namespace Rudracore::Boot {
 
 namespace {
+
+// The Shool protocol versions this kernel takes (ShoolLoader checks it).
+[[gnu::used, gnu::section(".shool_kernel")]]
+volatile Shool::KernelHeader const shoolHeader = {
+    .magic = Shool::KERNEL_MAGIC,
+    .check = ~Shool::KERNEL_MAGIC,
+    .minVersion = Shool::VERSION,
+    .maxVersion = Shool::VERSION,
+};
 
 // Requests are found by the bootloader by scanning between the start and end
 // markers, so they must live in the .limine_requests* sections.
@@ -144,11 +155,16 @@ RegionType regionTypeFromShool(u32 type) {
 
 void collectFromShool(Shool::BootInfo const& boot) {
     info.protocolSupported = boot.version == Shool::VERSION and boot.size == sizeof(Shool::BootInfo);
-    if (not info.protocolSupported)
+    if (not info.protocolSupported) {
+        log("[boot] ShoolLoader speaks Shool protocol v", boot.version, ", this kernel v", Shool::VERSION);
         return;
+    }
 
     copyString(info.loaderName, sizeof(info.loaderName), boot.loaderName);
     copyString(info.loaderVersion, sizeof(info.loaderVersion), boot.loaderVersion);
+    info.verifiedBoot = boot.flags & Shool::FLAG_VERIFIED_BOOT;
+    info.secureBoot = boot.flags & Shool::FLAG_SECURE_BOOT;
+    info.diagnostic = boot.flags & Shool::FLAG_DIAGNOSTIC;
     info.hhdmOffset = boot.hhdmOffset;
     info.kernelPhysicalBase = boot.kernelPhysical;
     info.kernelVirtualBase = boot.kernelVirtual;
@@ -187,7 +203,166 @@ void collectFromShool(Shool::BootInfo const& boot) {
     info.acpiRsdp = boot.acpiRsdp;
 }
 
+// MARK: Validation
+
+constexpr u64 PAGE = 4096;
+constexpr u64 PHYSICAL_LIMIT = 1ull << 52; // x86-64's architectural maximum
+constexpr u64 HIGHER_HALF = 0xffff800000000000;
+constexpr u64 KERNEL_MIN = 0xffffffff80000000;
+
+bool allocatable(RegionType t) { return t == RegionType::Usable or t == RegionType::BootloaderReclaimable; }
+u64 alignUp(u64 v) { return (v + PAGE - 1) & ~(PAGE - 1); }
+u64 alignDown(u64 v) { return v & ~(PAGE - 1); }
+
+void refuse(char const* why) {
+    log("[boot] unusable boot information: ", why);
+    info.protocolSupported = false;
+}
+
+// (Takes the Info to work on, so selfTest can feed it a broken map.)
+void validateRegions(Info& info) {
+    // Drop impossible regions; page-align allocatable ones inward.
+    usize kept = 0;
+    for (usize i = 0; i < info.regionCount; i++) {
+        Region r = info.regions[i];
+        if (r.length == 0 or r.base >= PHYSICAL_LIMIT or r.length > PHYSICAL_LIMIT - r.base) {
+            info.memoryFixes++;
+            continue;
+        }
+        if (allocatable(r.type)) {
+            u64 start = alignUp(r.base), end = alignDown(r.base + r.length);
+            if (start >= end) {
+                info.memoryFixes++;
+                continue;
+            }
+            info.memoryFixes += start != r.base or end != r.base + r.length;
+            r = {start, end - start, r.type};
+        }
+        info.regions[kept++] = r;
+    }
+    info.regionCount = kept;
+
+    // Allocatable memory may overlap nothing: cut the overlap out of it (of
+    // two allocatable regions, out of the later one), keeping the larger
+    // side when the other region sits in the middle. Each cut shrinks a
+    // region, so this ends.
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (usize i = 0; i < info.regionCount and not changed; i++) {
+            Region& a = info.regions[i];
+            if (not allocatable(a.type) or a.length == 0)
+                continue;
+            for (usize j = 0; j < info.regionCount; j++) {
+                Region const& b = info.regions[j];
+                if (j == i or b.length == 0 or (allocatable(b.type) and j > i))
+                    continue;
+                u64 aEnd = a.base + a.length, bEnd = b.base + b.length;
+                if (b.base >= aEnd or a.base >= bEnd)
+                    continue;
+                u64 before = b.base > a.base ? alignDown(b.base) - a.base : 0;
+                u64 afterStart = alignUp(bEnd);
+                u64 after = aEnd > afterStart ? aEnd - afterStart : 0;
+                if (before >= after) {
+                    a.length = before;
+                } else {
+                    a.base = afterStart;
+                    a.length = after;
+                }
+                info.memoryFixes++;
+                changed = true;
+                break;
+            }
+        }
+    }
+    kept = 0;
+    for (usize i = 0; i < info.regionCount; i++) {
+        if (info.regions[i].length)
+            info.regions[kept++] = info.regions[i];
+    }
+    info.regionCount = kept;
+}
+
+// True if [physical, physical + size) lies inside one Kernel region.
+bool inKernelMemory(u64 physical, u64 size) {
+    for (usize i = 0; i < info.regionCount; i++) {
+        Region const& r = info.regions[i];
+        if (r.type == RegionType::Kernel and physical >= r.base and physical - r.base <= r.length and
+            size <= r.length - (physical - r.base))
+            return true;
+    }
+    return false;
+}
+
+void validate() {
+    if (info.hhdmOffset < HIGHER_HALF or info.hhdmOffset % PAGE)
+        return refuse("the direct map isn't in the higher half");
+    if (info.kernelVirtualBase < KERNEL_MIN or info.kernelPhysicalBase % PAGE)
+        return refuse("the kernel isn't where it was linked to run");
+
+    validateRegions(info);
+    if (info.memoryFixes)
+        log("[boot] memory map: repaired ", info.memoryFixes, " problem(s) (overlapping, unaligned or impossible regions)");
+    bool usable = false;
+    for (usize i = 0; i < info.regionCount; i++)
+        usable = usable or info.regions[i].type == RegionType::Usable;
+    if (not usable)
+        return refuse("no usable memory");
+
+    for (usize i = 0; i < info.moduleCount; i++) {
+        Module const& m = info.modules[i];
+        u64 physical = reinterpret_cast<u64>(m.data) - info.hhdmOffset;
+        if (reinterpret_cast<u64>(m.data) < info.hhdmOffset or not inKernelMemory(physical, m.size)) {
+            log("[boot] module ", m.name, " isn't in kernel memory");
+            return refuse("a module could be overwritten");
+        }
+    }
+
+    if (info.hasFramebuffer) {
+        auto const& fb = info.framebuffer;
+        if (not fb.address or fb.bpp != 32 or fb.width == 0 or fb.height == 0 or fb.width > 16384 or
+            fb.height > 16384 or fb.pitch < fb.width * 4 or fb.pitch > 65536) {
+            log("[boot] the framebuffer doesn't make sense: serial output only");
+            info.hasFramebuffer = false;
+        }
+    }
+}
+
 } // namespace
+
+bool selfTest() {
+    static Info t;
+    t = {};
+    constexpr auto U = RegionType::Usable, K = RegionType::Kernel, R = RegionType::Reserved,
+                   B = RegionType::BootloaderReclaimable;
+    Region const broken[] = {
+        {0x1000, 0xF000, U},              // a kernel region in the middle: keeps the lower part
+        {0x8000, 0x1000, K},
+        {0x20010, 0x10000, U},            // unaligned: shrinks to whole pages
+        {0x40000, 0x10000, U},            // the reserved region covers its start
+        {0x3F800, 0x2000, R},
+        {0x60000, 0x8000, U},             // two usable regions overlapping: the later one is cut
+        {0x64000, 0x8000, B},
+        {0x80000, 0, U},                  // empty
+        {0xFFFFFFFFFFFFF000, 0x2000, U},  // wraps
+        {1ull << 53, 0x1000, U},          // beyond any physical address
+        {0x90000, 0x800, U},              // smaller than a page once aligned
+    };
+    for (Region const& r : broken)
+        t.regions[t.regionCount++] = r;
+    validateRegions(t);
+    Region const expected[] = {
+        {0x1000, 0x7000, U}, {0x8000, 0x1000, K}, {0x21000, 0xF000, U}, {0x42000, 0xE000, U},
+        {0x3F800, 0x2000, R}, {0x60000, 0x8000, U}, {0x68000, 0x4000, B},
+    };
+    if (t.regionCount != sizeof(expected) / sizeof(expected[0]))
+        return false;
+    for (usize i = 0; i < t.regionCount; i++) {
+        if (t.regions[i].base != expected[i].base or t.regions[i].length != expected[i].length or
+            t.regions[i].type != expected[i].type)
+            return false;
+    }
+    return true;
+}
 
 Info const& collect(u64 magic, u64 shoolInfo) {
     info = {};
@@ -196,6 +371,8 @@ Info const& collect(u64 magic, u64 shoolInfo) {
         auto const* boot = reinterpret_cast<Shool::BootInfo const*>(shoolInfo);
         if (boot->magic == Shool::MAGIC) {
             collectFromShool(*boot);
+            if (info.protocolSupported)
+                validate();
             return info;
         }
     }
@@ -261,6 +438,8 @@ Info const& collect(u64 magic, u64 shoolInfo) {
         info.acpiRsdp = address >= info.hhdmOffset ? address - info.hhdmOffset : address;
     }
 
+    if (info.protocolSupported)
+        validate();
     return info;
 }
 

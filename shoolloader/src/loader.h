@@ -30,8 +30,16 @@ void print(char const* text);
 void printNumber(uint64_t value);
 void printSize(uint64_t bytes);
 
-// Shows the error, waits so it can be read, then stops.
+// Shows the error, waits (30 s, or until a key) so it can be read, then
+// returns to the firmware, which tries its next boot option. Only before
+// ExitBootServices.
 [[noreturn]] void fail(char const* what, Efi::Status status = 0);
+
+// The character of a key waiting in the firmware's buffer, or 0 (doesn't wait).
+Efi::Char16 pendingKey();
+
+// Waits up to `seconds` for a key; true if one came.
+bool waitForKey(uint64_t seconds);
 
 // MARK: Memory
 
@@ -62,12 +70,16 @@ struct Config {
     char modules[Shool::BootInfo::MAX_MODULES][MAX_PATH];
     uint32_t moduleCount;
     uint32_t width, height; // preferred resolution, 0 = automatic
+    bool diagnostic;
 };
 
 // Reads /boot/shool.cfg (defaults when missing):
-//   kernel = /boot/rudracore.elf
-//   module = /boot/init.elf        (repeatable)
-//   resolution = 1280x800
+//   kernel = /boot/rudracore.elf   (exactly once)
+//   module = /boot/init.elf        (up to 32, each once)
+//   resolution = 1280x800          (optional)
+//   diagnostic = yes               (optional: as if D were held)
+// Any error (unknown key, bad value, overlong path, control character)
+// fail()s with its line number.
 Config readConfig(Efi::File* root);
 
 // "/boot/init.elf" -> "init"
@@ -91,7 +103,16 @@ struct Kernel {
     uint64_t entry;
 };
 
+// Checks the ELF file thoroughly (headers, segments in the top 2 GiB and not
+// overlapping, entry point in an executable segment, at most 64 MiB) and
+// that its KernelHeader takes this loader's protocol version; fail()s
+// otherwise. Then copies it into fresh kernel memory.
 Kernel loadKernel(FileData const& file);
+
+// fail()s if a ".elf" module isn't a well-formed x86_64 ELF executable
+// (other modules are data). The kernel checks programs fully at spawn;
+// this catches a broken boot image early, with a readable message.
+void checkModule(char const* path, FileData const& file);
 
 // MARK: Graphics
 
@@ -105,6 +126,12 @@ void drawTrident(Shool::Framebuffer const& fb);
 // Builds the kernel's first page tables (identity + direct map of every
 // memory region, plus the kernel image). Returns the PML4's address.
 uint64_t buildPageTables(Kernel const& kernel, Shool::Framebuffer const& fb);
+
+// Before handing over: fail()s unless the CPU has what the kernel needs (NX)
+// and the new page tables map the kernel, its entry point, stack, boot info,
+// modules, framebuffer and this hand-over code where the protocol says.
+void checkHandover(uint64_t pml4, Kernel const& kernel, uint64_t stack, uint64_t stackSize,
+                   Shool::BootInfo const* info);
 
 // Exits boot services and fills `info` with the final memory map.
 void exitBootServices(Shool::BootInfo& info);

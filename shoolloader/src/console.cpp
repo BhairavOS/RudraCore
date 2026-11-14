@@ -47,6 +47,22 @@ void printSize(uint64_t bytes) {
     }
 }
 
+Efi::Char16 pendingKey() {
+    Efi::InputKey key{};
+    if (Efi::failed(system->conIn->readKeyStroke(system->conIn, &key)))
+        return 0;
+    return key.unicodeChar ? key.unicodeChar : u'?'; // (arrow keys and such count too)
+}
+
+bool waitForKey(uint64_t seconds) {
+    for (uint64_t i = 0; i < seconds * 20; i++) {
+        if (pendingKey())
+            return true;
+        bootServices->stall(50 * 1000);
+    }
+    return false;
+}
+
 void fail(char const* what, Efi::Status status) {
     print("\nShoolLoader: can't boot: ");
     print(what);
@@ -55,10 +71,16 @@ void fail(char const* what, Efi::Status status) {
         printNumber(status & ~Efi::ERROR_BIT);
         print(")");
     }
-    print("\n");
-    bootServices->stall(30 * 1000 * 1000);
+    print("\n\nPress a key, or wait 30 seconds, to go back to the firmware:\n"
+          "it tries the next boot option (a recovery medium, another system).\n");
+    for (int i = 0; i < 64 and pendingKey(); i++) {
+    } // (keys pressed before the error, such as a held D)
+    waitForKey(30);
+    // Recovery: hand control back instead of halting. Nothing has been
+    // started yet (this is only ever called before ExitBootServices).
+    bootServices->exit(imageHandle, Efi::LOAD_ERROR, 0, nullptr);
     for (;;)
-        asm volatile("cli; hlt");
+        asm volatile("cli; hlt"); // (the firmware refused to take it back)
 }
 
 void copyMemory(void* dest, void const* src, uint64_t size) {

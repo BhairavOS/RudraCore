@@ -8,6 +8,8 @@
 #include "arch/x86_64/protect.h"
 #include "boot.h"
 #include "config.h"
+
+#include <shool/boot.h>
 #include "core/device.h"
 #include "core/programs.h"
 #include "core/random.h"
@@ -48,6 +50,17 @@ void logBootInfo(Boot::Info const& info) {
         log("[boot] display     none (serial only)");
     }
     log("[boot] modules     ", info.moduleCount);
+    log("[boot] integrity   ", info.verifiedBoot ? "verified boot (signed boot files)" : "boot files not signature-checked",
+        info.secureBoot ? ", Secure Boot on" : ", Secure Boot off");
+    if (not info.diagnostic)
+        return;
+    log("[diag] diagnostic boot: memory map after validation (", info.memoryFixes, " repair(s))");
+    for (usize i = 0; i < info.regionCount; i++) {
+        auto const& r = info.regions[i];
+        log("[diag]   ", Hex{r.base}, " ", Bytes{r.length}, " ", Boot::regionTypeName(r.type));
+    }
+    for (usize i = 0; i < info.moduleCount; i++)
+        log("[diag]   module ", info.modules[i].name, " ", Bytes{info.modules[i].size});
 }
 
 void logMemory(char const* label) {
@@ -278,7 +291,8 @@ extern "C" [[noreturn]] void kmain(u64 bootMagic, u64 bootInfo) {
 
     Boot::Info const& info = Boot::collect(bootMagic, bootInfo);
     if (not info.protocolSupported) {
-        log("rudracore: panic: unsupported bootloader (needs the Shool protocol v1 or Limine base revision 3)");
+        log("rudracore: panic: unusable boot information (needs the Shool protocol v", Shool::VERSION,
+            " or Limine base revision 3, and a sane memory map: see above)");
         Arch::halt();
     }
     Mem::hhdmOffset = info.hhdmOffset;
@@ -287,6 +301,9 @@ extern "C" [[noreturn]] void kmain(u64 bootMagic, u64 bootInfo) {
     log("RudraCore ", VERSION, " - Efficient microkernel for Bhairav OS");
     log("");
     logBootInfo(info);
+    if (not Boot::selfTest())
+        panic("boot: memory map validation repaired a broken test map wrongly");
+    log("[boot] memory map validation ok (a broken test map was repaired correctly)");
 
     Arch::Gdt::init();
     Arch::Idt::init();

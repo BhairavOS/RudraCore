@@ -108,6 +108,19 @@ struct SimpleTextOutput {
     void* mode;
 };
 
+struct InputKey {
+    uint16_t scanCode;
+    Char16 unicodeChar;
+};
+
+struct SimpleTextInput {
+    Status (*reset)(SimpleTextInput*, bool extendedVerification);
+    Status (*readKeyStroke)(SimpleTextInput*, InputKey* key); // NOT_READY when no key is waiting
+    Event waitForKey;
+};
+
+constexpr Status NOT_READY = ERROR_BIT | 6;
+
 // MARK: Boot services
 
 struct BootServices {
@@ -142,7 +155,7 @@ struct BootServices {
 
     void* loadImage;
     void* startImage;
-    void* exit;
+    Status (*exit)(Handle image, Status exitStatus, uint64_t exitDataSize, Char16* exitData);
     void* unloadImage;
     Status (*exitBootServices)(Handle image, uint64_t mapKey);
 
@@ -175,6 +188,9 @@ constexpr uint32_t VARIABLE_NON_VOLATILE = 1;
 constexpr uint32_t VARIABLE_BOOTSERVICE_ACCESS = 2;
 constexpr uint32_t VARIABLE_RUNTIME_ACCESS = 4;
 
+// The vendor of the spec's own variables ("SecureBoot", "SetupMode", ...).
+constexpr Guid GLOBAL_VARIABLE = {0x8BE4DF61, 0x93CA, 0x11D2, {0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C}};
+
 struct RuntimeServices {
     TableHeader header;
 
@@ -202,7 +218,7 @@ struct SystemTable {
     Char16* firmwareVendor;
     uint32_t firmwareRevision;
     Handle consoleInHandle;
-    void* conIn;
+    SimpleTextInput* conIn;
     Handle consoleOutHandle;
     SimpleTextOutput* conOut;
     Handle standardErrorHandle;
