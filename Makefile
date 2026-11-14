@@ -150,7 +150,7 @@ QEMU_FLAGS := -M q35 -m 256M -cdrom $(ISO) -boot d \
 	-netdev user,id=net -device $(NIC),netdev=net
 
 .PHONY: all kernel user shool iso disk disk-image packages repo serve-repo install-app run run-uefi run-secureboot \
-	secure-boot-vars shot clean FORCE
+	secure-boot-vars tls-negative shot clean FORCE
 
 all: iso $(DISK)
 
@@ -458,6 +458,11 @@ $(DISK_IMAGE): $(ISO) assets/welcome.txt
 	mcopy -i $@.tmp@@$$(((1 + $(ESP_MB)) * 1048576)) assets/welcome.txt ::/welcome.txt
 	$(LIMINE_DIR)/limine bios-install $@.tmp >/dev/null
 	mv $@.tmp $@
+
+# TLS 1.3 negative tests: misbehaving servers and a tampering proxy on this
+# machine; tls-test in Bhairav OS must refuse each (scripts/tls-negative.sh).
+tls-negative: $(ISO) $(DISK) $(BPK) $(SERVE)
+	sh scripts/tls-negative.sh $(ISO) $(BUILD) $(DISK)
 
 # Serial console in the terminal (no window). Quit with Ctrl+A then X.
 run: $(ISO) $(DISK)

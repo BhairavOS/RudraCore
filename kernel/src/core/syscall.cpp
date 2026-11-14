@@ -363,7 +363,8 @@ Arch::Frame* sysRandom(Call const& c) {
     if (not c.userMemory(address, length, true))
         return c.result(Abi::BAD_ADDRESS);
     u8 bytes[256];
-    Random::fill(bytes, length);
+    if (not Random::fill(bytes, length))
+        return c.result(Abi::IO_ERROR); // the generator failed its health tests
     toUser(address, bytes, length);
     memset(bytes, 0, sizeof(bytes)); // no copy stays behind on the kernel stack
     asm volatile("" : : "r"(bytes) : "memory");

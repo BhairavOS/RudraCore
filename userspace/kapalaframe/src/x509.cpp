@@ -29,11 +29,13 @@ bool read(Der& in, u8& tag, Der& content, Der* whole = nullptr) {
     u64 length = in.p[1], header = 2;
     if (length & 0x80) {
         u64 bytes = length & 0x7f;
-        if (bytes == 0 or bytes > 4 or in.n < 2 + bytes)
+        if (bytes == 0 or bytes > 4 or in.n < 2 + bytes or in.p[2] == 0) // DER: no indefinite or padded lengths
             return false;
         length = 0;
         for (u64 i = 0; i < bytes; i++)
             length = length << 8 | in.p[2 + i];
+        if (length < 128) // DER: the short form when it fits
+            return false;
         header += bytes;
     }
     if (length > in.n - header)
@@ -72,6 +74,8 @@ OID(BASIC_CONSTRAINTS, 0x55, 0x1d, 0x13);
 OID(KEY_USAGE, 0x55, 0x1d, 0x0f);
 OID(EXTENDED_KEY_USAGE, 0x55, 0x1d, 0x25);
 OID(CERTIFICATE_POLICIES, 0x55, 0x1d, 0x20);
+OID(SERVER_AUTH, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01);
+OID(ANY_EXTENDED_KEY_USAGE, 0x55, 0x1d, 0x25, 0x00);
 #undef OID
 
 #define IS(oid, NAME) isOid(oid, NAME, sizeof(NAME))
@@ -89,6 +93,10 @@ struct Cert {
     Der keyParam;  // EC: the curve's OID
     Der key;       // bit string contents after the unused-bits byte
     bool ca = false;
+    long pathLength = -1;     // basicConstraints pathLenConstraint (-1: none)
+    bool hasKeyUsage = false; // keyUsage present...
+    bool digitalSignature = false, keyCertSign = false; // ...and these bits set
+    bool hasExtendedKeyUsage = false, serverAuth = false; // EKU present, and it allows TLS servers
     Der names;     // subjectAltName: the GeneralNames' contents
 };
 
@@ -135,6 +143,8 @@ bool readTime(Der& in, u64& out) {
     two(v[3]);
     two(v[4]);
     two(v[5]);
+    if (v[1] < 1 or v[1] > 12 or v[2] < 1 or v[2] > 31 or v[3] > 23 or v[4] > 59 or v[5] > 59)
+        return false;
     long days = daysFromCivil(year, v[1], v[2]);
     out = static_cast<u64>(days * 86400 + v[3] * 3600 + v[4] * 60 + v[5]);
     return true;
@@ -169,12 +179,33 @@ bool parseExtensions(Der list, Cert& c) {
             if (not expect(value, 0x30, c.names))
                 return false;
         } else if (IS(oid, BASIC_CONSTRAINTS)) {
-            Der seq, flag;
+            Der seq, flag, length;
             if (not expect(value, 0x30, seq))
                 return false;
             c.ca = seq.n and seq.p[0] == 0x01 and expect(seq, 0x01, flag) and flag.n == 1 and flag.p[0];
-        } else if (critical and not IS(oid, KEY_USAGE) and not IS(oid, EXTENDED_KEY_USAGE) and
-                   not IS(oid, CERTIFICATE_POLICIES)) {
+            if (seq.n) { // pathLenConstraint
+                if (not expect(seq, 0x02, length) or length.n == 0 or length.n > 2 or (length.p[0] & 0x80))
+                    return false;
+                c.pathLength = length.n == 1 ? length.p[0] : length.p[0] << 8 | length.p[1];
+            }
+        } else if (IS(oid, KEY_USAGE)) {
+            Der bits;
+            if (not expect(value, 0x03, bits) or bits.n < 2)
+                return false;
+            c.hasKeyUsage = true;
+            c.digitalSignature = bits.p[1] & 0x80; // bit 0
+            c.keyCertSign = bits.p[1] & 0x04;      // bit 5
+        } else if (IS(oid, EXTENDED_KEY_USAGE)) {
+            Der list, purpose;
+            if (not expect(value, 0x30, list))
+                return false;
+            c.hasExtendedKeyUsage = true;
+            while (list.n) {
+                if (not expect(list, 0x06, purpose))
+                    return false;
+                c.serverAuth = c.serverAuth or IS(purpose, SERVER_AUTH) or IS(purpose, ANY_EXTENDED_KEY_USAGE);
+            }
+        } else if (critical and not IS(oid, CERTIFICATE_POLICIES)) {
             return false; // a critical rule we don't understand: refuse rather than ignore it
         }
     }
@@ -183,16 +214,17 @@ bool parseExtensions(Der list, Cert& c) {
 
 bool parse(u8 const* p, u64 n, Cert& c) {
     c = {};
-    Der in{p, n}, cert, tbs, alg;
+    Der in{p, n}, cert, tbs, alg, algWhole, tbsAlgWhole;
     if (not expect(in, 0x30, cert) or in.n != 0)
         return false;
-    if (not expect(cert, 0x30, tbs, &c.tbs) or not expect(cert, 0x30, alg) or not expect(alg, 0x06, c.sigAlg) or
-        not bitString(cert, c.sigValue))
+    if (not expect(cert, 0x30, tbs, &c.tbs) or not expect(cert, 0x30, alg, &algWhole) or
+        not expect(alg, 0x06, c.sigAlg) or not bitString(cert, c.sigValue) or cert.n != 0)
         return false;
     Der skip, validity, spki, keyAlg;
     if (tbs.n and tbs.p[0] == 0xa0 and not expect(tbs, 0xa0, skip)) // version
         return false;
-    if (not expect(tbs, 0x02, skip) or not expect(tbs, 0x30, skip) or // serial, signature algorithm
+    // The signed algorithm must be the one outside (RFC 5280 4.1.1.2).
+    if (not expect(tbs, 0x02, skip) or not expect(tbs, 0x30, skip, &tbsAlgWhole) or not same(algWhole, tbsAlgWhole) or
         not expect(tbs, 0x30, skip, &c.issuer) or not expect(tbs, 0x30, validity) or
         not readTime(validity, c.notBefore) or not readTime(validity, c.notAfter) or
         not expect(tbs, 0x30, skip, &c.subject) or not expect(tbs, 0x30, spki) or
@@ -251,7 +283,9 @@ bool verifyWith(Cert const& signer, Kind kind, C::Hash hash, Der data, Der signa
         if (not bits or (curveBits and bits != curveBits))
             return false;
         Der sig = signature, seq, r, s;
-        if (not expect(sig, 0x30, seq) or not expect(seq, 0x02, r) or not expect(seq, 0x02, s))
+        // Exactly SEQUENCE { r, s }: positive integers, nothing after them.
+        if (not expect(sig, 0x30, seq) or not expect(seq, 0x02, r) or not expect(seq, 0x02, s) or seq.n or sig.n or
+            r.n == 0 or s.n == 0 or (r.p[0] & 0x80) or (s.p[0] & 0x80))
             return false;
         r = stripZero(r);
         s = stripZero(s);
@@ -307,7 +341,13 @@ bool nameMatches(char const* pattern, u64 patternLength, char const* host) {
     while (host[hostLength])
         hostLength++;
     if (patternLength > 2 and pattern[0] == '*' and pattern[1] == '.') {
-        // "*.example.com": exactly one more label in front
+        // "*.example.com": exactly one more label in front. The rest must
+        // have two labels itself: "*.com" names nobody.
+        bool twoLabels = false;
+        for (u64 i = 2; i + 1 < patternLength; i++)
+            twoLabels = twoLabels or pattern[i] == '.';
+        if (not twoLabels)
+            return false;
         u64 dot = 0;
         while (dot < hostLength and host[dot] != '.')
             dot++;
@@ -342,6 +382,11 @@ char const* verifyChain(Chain const& chain, char const* host, unsigned long now,
     }
     if (not namesHost(certs[0], host))
         return "the certificate is for another site";
+    // The leaf must be meant for a TLS server: if it limits its key's use,
+    // signing (CertificateVerify) and serverAuth must be allowed.
+    if ((certs[0].hasKeyUsage and not certs[0].digitalSignature) or
+        (certs[0].hasExtendedKeyUsage and not certs[0].serverAuth))
+        return "the certificate isn't meant for a TLS server (key usage)";
 
     bool used[MAX_CHAIN] = {true};
     Cert const* current = &certs[0];
@@ -349,8 +394,15 @@ char const* verifyChain(Chain const& chain, char const* host, unsigned long now,
         if (now < current->notBefore or now > current->notAfter)
             return depth ? "a certificate in the chain has expired (or isn't valid yet)"
                          : "the certificate has expired (or isn't valid yet; is the clock right?)";
-        if (depth > 0 and not current->ca)
-            return "a certificate in the chain isn't allowed to sign others";
+        if (depth > 0) {
+            if (not current->ca or (current->hasKeyUsage and not current->keyCertSign))
+                return "a certificate in the chain isn't allowed to sign others";
+            // pathLenConstraint: how many intermediates may follow below it.
+            if (current->pathLength >= 0 and static_cast<long>(depth) - 1 > current->pathLength)
+                return "the chain is longer than an authority allows (path length)";
+            if (current->hasExtendedKeyUsage and not current->serverAuth)
+                return "an authority in the chain isn't allowed to vouch for TLS servers";
+        }
 
         // Signed by a trusted root?
         bool trusted = false;

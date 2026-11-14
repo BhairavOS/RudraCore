@@ -64,6 +64,9 @@ IOMMU=1 make shot FAULT_TEST=dma       # don't map drivers' buffers: the IOMMU m
 IOMMU=1 make shot FAULT_TEST=msi       # aim the SATA controller's MSI at the CPU as an NMI: interrupt remapping must block it
 IOMMU=dma-only make shot               # VT-d without interrupt remapping
 make run-secureboot                    # UEFI Secure Boot on, only this build's key enrolled (build/secureboot.cer)
+make disk-image                        # build/bhairavos.img: GPT disk (ESP + data partition) for a USB stick or disk
+make tls-negative                      # TLS 1.3 negative tests: misbehaving servers and a tampering proxy
+make PREVIOUS_KERNEL=old/rudracore.elf # ship a known-good kernel as the boot menu's fallback entry
 make shot FIRMWARE=uefi WAIT=9         # boot through UEFI instead of BIOS
 STEP=0.1 MONITOR="..." make shot       # faster mouse commands (e.g. double clicks)
 NIC=rtl8139 make shot                  # a Realtek network card instead of the Intel one

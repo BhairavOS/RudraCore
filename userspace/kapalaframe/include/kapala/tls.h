@@ -36,6 +36,11 @@ public:
     // key. OK, or an error (error() then describes it).
     long connect(Net& net, long socket, char const* host);
 
+    // Trust these roots (a catalog of DER certificates, as roots.bin)
+    // instead of roots.bin. For tests with their own authority; call
+    // before connect().
+    void useRoots(unsigned char const* catalog) { _roots = catalog; }
+
     // Sends all of it.
     long send(void const* data, unsigned long length);
 
@@ -48,6 +53,11 @@ public:
     char const* cipher() const { return _cipher; }
     char const* error() const { return _error; }
     bool verified() const { return _verified; } // the server proved it's the host
+
+    // True if the server ended with close_notify. A connection that just
+    // drops may have been cut short by an attacker (truncation): callers
+    // that read until the end must check this.
+    bool closedCleanly() const { return _cleanClose; }
 
     // The certificates the server sent (until this object is destroyed).
     X509::Chain const& chain() const { return _chain; }
@@ -72,8 +82,13 @@ private:
     bool _aes = false;     // AES-128-GCM, else ChaCha20-Poly1305
     bool _encrypted = false;
     bool _closed = false;
+    bool _cleanClose = false;
+    unsigned char const* _roots = nullptr; // useRoots(), else roots.bin
     Direction _read, _write;
-    u8 _readSecret[32];
+    u8 _readSecret[32] = {};
+    u8 _writeSecret[32] = {}; // kept to answer the server's KeyUpdate requests
+
+    void forgetKeys();
 
     // Received bytes not yet made into records.
     u8* _in = nullptr;

@@ -393,9 +393,12 @@ public:
                 // partition (never the EFI System Partition), through the
                 // primary header or, if that's damaged, the backup.
                 u64 count = 0;
-                if (not gptPartition(1, _base, count) and not gptPartition(disk.sectors() - 1, _base, count)) {
-                    log("the disk's GPT is damaged or has no Bhairav data partition");
-                    return false;
+                if (not gptPartition(1, _base, count)) {
+                    if (not gptPartition(disk.sectors() - 1, _base, count)) {
+                        log("the disk's GPT is damaged or has no Bhairav data partition");
+                        return false;
+                    }
+                    log("the disk's primary GPT header is damaged: using the backup");
                 }
                 end = _base + count;
             } else {

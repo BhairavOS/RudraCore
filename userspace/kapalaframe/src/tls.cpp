@@ -99,10 +99,19 @@ char const* alertText(u8 code) {
 
 } // namespace
 
-Tls::~Tls() {
+// Key lifecycle: traffic keys and secrets live only while the connection
+// is open; close() and the destructor overwrite them.
+void Tls::forgetKeys() {
     C::wipe(&_read, sizeof(_read));
     C::wipe(&_write, sizeof(_write));
     C::wipe(_readSecret, sizeof(_readSecret));
+    C::wipe(_writeSecret, sizeof(_writeSecret));
+}
+
+Tls::~Tls() {
+    forgetKeys();
+    if (_plain)
+        C::wipe(_plain, MAX_RECORD); // (decrypted data)
     delete[] _in;
     delete[] _plain;
     delete[] _handshake;
@@ -205,6 +214,8 @@ bool Tls::decrypt(Direction& d, u8 const* header, u8* data, u64& length, u8& typ
                    : C::chachaPolyOpen(d.key, nonce, header, 5, data, plainLength, data);
     if (not ok)
         return false;
+    if (plainLength > 16384 + 1) // TLSInnerPlaintext is at most 2^14 + 1 bytes (record_overflow)
+        return false;
     // The content type is the last non-zero byte (zeros after it are padding).
     while (plainLength and data[plainLength - 1] == 0)
         plainLength--;
@@ -241,15 +252,24 @@ long Tls::nextHandshake(u8& type, u8*& body, u64& length) {
         long r = readRecord(recordType, data, recordLength, 15000);
         if (r < 0)
             return r;
-        if (recordType == CHANGE_CIPHER_SPEC)
-            continue; // sent only for old middleboxes
+        if (recordType == CHANGE_CIPHER_SPEC) {
+            // Sent only for old middleboxes: exactly one byte, 1, and only
+            // between ServerHello and the server's Finished.
+            if (not _encrypted or recordLength != 1 or data[0] != 1)
+                return fail("the server sent a stray ChangeCipherSpec", Sys::INVALID_ARGUMENT);
+            continue;
+        }
         if (_encrypted and recordType == APPLICATION_DATA) {
             if (not decrypt(_read, data - 5, data, recordLength, recordType))
                 return fail("a record from the server didn't decrypt", Sys::INVALID_ARGUMENT);
+        } else if (_encrypted and recordType == HANDSHAKE) {
+            // Once the keys change, handshake messages come only encrypted.
+            return fail("the server sent an unencrypted handshake message after the key change",
+                        Sys::INVALID_ARGUMENT);
         }
         if (recordType == ALERT)
             return fail(recordLength >= 2 ? alertText(data[1]) : "alert", Sys::CONNECTION_RESET);
-        if (recordType != HANDSHAKE)
+        if (recordType != HANDSHAKE or recordLength == 0)
             return fail("the server sent something unexpected", Sys::INVALID_ARGUMENT);
         if (_handshakeLength + recordLength > HANDSHAKE_CAPACITY)
             return fail("the handshake is too big", Sys::INVALID_ARGUMENT);
@@ -270,9 +290,11 @@ long Tls::connect(Net& net, long socket, char const* host) {
         return fail("out of memory", Sys::OUT_OF_MEMORY);
 
     u8 secretKey[32], publicKey[32], random[32], sessionId[32];
-    Sys::random(secretKey, 32);
-    Sys::random(random, 32);
-    Sys::random(sessionId, 32);
+    if (Sys::random(secretKey, 32) != Sys::OK or Sys::random(random, 32) != Sys::OK or
+        Sys::random(sessionId, 32) != Sys::OK) {
+        C::wipe(secretKey, 32);
+        return fail("the system has no healthy random number source", Sys::IO_ERROR); // fail closed
+    }
     C::x25519Base(publicKey, secretKey);
 
     // ClientHello
@@ -357,29 +379,44 @@ long Tls::connect(Net& net, long socket, char const* host) {
         return fail("the server didn't answer with a ServerHello", Sys::INVALID_ARGUMENT);
     u8 const* p = message + 4;
     u8 const* end = message + length;
+    if (get16(p) != 0x0303)
+        return fail("the ServerHello has the wrong legacy version", Sys::INVALID_ARGUMENT);
     if (C::equal(p + 2, RETRY_RANDOM, 32))
         return fail("the server wants a different key exchange (HelloRetryRequest)", Sys::INVALID_ARGUMENT);
     p += 2 + 32;
-    p += 1 + p[0]; // session id
-    if (p + 5 > end)
-        return fail("the ServerHello is cut short", Sys::INVALID_ARGUMENT);
+    // The session id must echo ours (RFC 8446 4.1.3).
+    if (p[0] != 32 or p + 1 + 32 + 5 > end or not C::equal(p + 1, sessionId, 32))
+        return fail("the ServerHello doesn't echo our session id", Sys::INVALID_ARGUMENT);
+    p += 1 + 32;
     unsigned short suite = get16(p);
+    if (p[2] != 0)
+        return fail("the server chose compression", Sys::INVALID_ARGUMENT);
     p += 3; // suite and compression
     u8 serverKey[32];
     bool haveKey = false, tls13 = false;
     u64 extLength = get16(p);
     p += 2;
-    u8 const* extEnd = p + extLength <= end ? p + extLength : end;
-    while (p + 4 <= extEnd) {
+    if (p + extLength != end)
+        return fail("the ServerHello's extensions don't fill it exactly", Sys::INVALID_ARGUMENT);
+    while (p < end) {
+        if (p + 4 > end)
+            return fail("the ServerHello's extensions are malformed", Sys::INVALID_ARGUMENT);
         unsigned short ext = get16(p), n = get16(p + 2);
         u8 const* v = p + 4;
-        if (v + n > extEnd)
-            break;
-        if (ext == 43 and n == 2 and get16(v) == 0x0304)
+        if (v + n > end)
+            return fail("the ServerHello's extensions are malformed", Sys::INVALID_ARGUMENT);
+        if (ext == 43) {
+            if (tls13 or n != 2 or get16(v) != 0x0304)
+                return fail("the ServerHello's supported_versions is wrong or repeated", Sys::INVALID_ARGUMENT);
             tls13 = true;
-        if (ext == 51 and n == 36 and get16(v) == 0x001d and get16(v + 2) == 32) {
+        } else if (ext == 51) {
+            if (haveKey or n != 36 or get16(v) != 0x001d or get16(v + 2) != 32)
+                return fail("the ServerHello's key_share is wrong or repeated", Sys::INVALID_ARGUMENT);
             memcpy(serverKey, v + 4, 32);
             haveKey = true;
+        } else {
+            // Only what we asked for may come back (unsupported_extension).
+            return fail("the ServerHello has an extension we didn't offer", Sys::INVALID_ARGUMENT);
         }
         p = v + n;
     }
@@ -392,6 +429,10 @@ long Tls::connect(Net& net, long socket, char const* host) {
     _aes = suite == AES_128_GCM;
     _cipher = _aes ? "TLS 1.3, AES-128-GCM" : "TLS 1.3, ChaCha20-Poly1305";
     transcript.update(message, length);
+    // The keys change after ServerHello: nothing unencrypted may follow it
+    // in the same record.
+    if (_handshakeLength != _handshakeConsumed)
+        return fail("the server sent handshake data across the key change", Sys::INVALID_ARGUMENT);
 
     // Handshake secrets.
     u8 shared[32];
@@ -413,11 +454,17 @@ long Tls::connect(Net& net, long socket, char const* host) {
     setKeys(_read, serverHs);
     _encrypted = true; // from now on the server's records are encrypted
 
-    // EncryptedExtensions, Certificate, CertificateVerify, Finished.
-    for (;;) {
+    // EncryptedExtensions, Certificate, CertificateVerify, Finished: in
+    // that order, each once (we never offer PSK, so the certificate is a must).
+    static constexpr u8 ORDER[] = {ENCRYPTED_EXTENSIONS, CERTIFICATE, CERTIFICATE_VERIFY, FINISHED};
+    for (unsigned step = 0;; step++) {
         r = nextHandshake(type, message, length);
         if (r < 0)
             return r;
+        if (type == CERTIFICATE_REQUEST)
+            return fail("the server wants a client certificate", Sys::INVALID_ARGUMENT);
+        if (step >= sizeof(ORDER) or type != ORDER[step])
+            return fail("the server's handshake messages are out of order", Sys::INVALID_ARGUMENT);
         if (type == CERTIFICATE) {
             if (long bad = checkCertificates(message, length, host))
                 return bad;
@@ -447,16 +494,16 @@ long Tls::connect(Net& net, long socket, char const* host) {
             expandLabel(serverHs, "finished", nullptr, 0, finishedKey, 32);
             transcript.peek(hash);
             C::hmacSha256(finishedKey, 32, hash, 32, expected);
+            C::wipe(finishedKey, 32);
             if (length != 4 + 32 or not C::equal(expected, message + 4, 32))
                 return fail("the server's Finished message doesn't match: the handshake was tampered with",
                             Sys::INVALID_ARGUMENT);
             transcript.update(message, length);
+            // The server's keys change after Finished too.
+            if (_handshakeLength != _handshakeConsumed)
+                return fail("the server sent handshake data across the key change", Sys::INVALID_ARGUMENT);
             break;
         }
-        if (type == CERTIFICATE_REQUEST)
-            return fail("the server wants a client certificate", Sys::INVALID_ARGUMENT);
-        if (type != ENCRYPTED_EXTENSIONS and type != CERTIFICATE and type != CERTIFICATE_VERIFY)
-            return fail("the server sent an unexpected handshake message", Sys::INVALID_ARGUMENT);
         transcript.update(message, length);
     }
 
@@ -478,11 +525,13 @@ long Tls::connect(Net& net, long socket, char const* host) {
     u8 finishedKey[32];
     expandLabel(clientHs, "finished", nullptr, 0, finishedKey, 32);
     C::hmacSha256(finishedKey, 32, hash, 32, finished + 4);
+    C::wipe(finishedKey, 32);
     r = sendRecord(HANDSHAKE, finished, sizeof(finished));
     if (r < 0)
         return fail("couldn't send Finished", r);
 
     setKeys(_write, clientAp);
+    memcpy(_writeSecret, clientAp, 32);
     setKeys(_read, _readSecret);
     C::wipe(handshakeSecret, 32);
     C::wipe(master, 32);
@@ -505,7 +554,9 @@ long Tls::checkCertificates(u8 const* message, u64 length, char const* host) {
     u8 const* end = _chainData + length;
     if (p >= end or p + 1 + p[0] + 3 > end)
         return fail("the server's Certificate message is malformed", Sys::INVALID_ARGUMENT);
-    p += 1 + p[0]; // request context
+    if (p[0] != 0) // a server's certificate has an empty request context
+        return fail("the server's Certificate message is malformed", Sys::INVALID_ARGUMENT);
+    p += 1;
     u8 const* listEnd = p + 3 + get24(p);
     p += 3;
     if (listEnd != end)
@@ -525,9 +576,12 @@ long Tls::checkCertificates(u8 const* message, u64 length, char const* host) {
         p += n;
         p += 2 + get16(p); // extensions
     }
+    if (p != listEnd)
+        return fail("the server's Certificate message is malformed", Sys::INVALID_ARGUMENT);
     Sys::SystemInfo info{};
     Sys::systemInfo(info);
-    static auto const* roots = static_cast<u8 const*>(Sys::openFile("roots"));
+    static auto const* systemRoots = static_cast<u8 const*>(Sys::openFile("roots"));
+    u8 const* roots = _roots ? _roots : systemRoots;
     if (not roots)
         return fail("this system has no trusted roots (roots.bin)", Sys::NOT_FOUND);
     if (char const* why = X509::verifyChain(_chain, host, info.unixTime, roots))
@@ -553,33 +607,52 @@ long Tls::receive(void* data, u64 capacity, unsigned timeoutMs) {
         u64 length;
         long r = readRecord(type, record, length, timeoutMs);
         if (r == Sys::PEER_CLOSED) {
-            _closed = true; // (a server closing without close_notify)
+            // No close_notify: the end may have been cut off. closedCleanly()
+            // stays false, so readers that go until the end can tell.
+            _closed = true;
+            forgetKeys();
             return 0;
         }
         if (r < 0)
             return r;
-        if (type == CHANGE_CIPHER_SPEC)
-            continue;
         if (type != APPLICATION_DATA or not decrypt(_read, record - 5, record, length, type))
             return fail("a record from the server didn't decrypt", Sys::INVALID_ARGUMENT);
         if (type == ALERT) {
             _closed = true;
-            if (length >= 2 and record[1] == 0) // close_notify
+            forgetKeys();
+            if (length == 2 and record[1] == 0) { // close_notify
+                _cleanClose = true;
                 return 0;
+            }
             return fail(length >= 2 ? alertText(record[1]) : "alert", Sys::CONNECTION_RESET);
         }
         if (type == HANDSHAKE) {
-            // After the handshake: session tickets (ignored) and key updates.
+            // After the handshake: session tickets (ignored) and key updates,
+            // each whole inside this record.
             u64 at = 0;
-            while (at + 4 <= length) {
+            while (at < length) {
+                if (at + 4 > length or get24(record + at + 1) > length - at - 4)
+                    return fail("the server sent a malformed post-handshake message", Sys::INVALID_ARGUMENT);
                 u64 n = get24(record + at + 1);
                 if (record[at] == KEY_UPDATE) {
+                    if (n != 1 or record[at + 4] > 1)
+                        return fail("the server sent a malformed KeyUpdate", Sys::INVALID_ARGUMENT);
                     u8 next[32];
                     expandLabel(_readSecret, "traffic upd", nullptr, 0, next, 32);
                     memcpy(_readSecret, next, 32);
                     setKeys(_read, _readSecret);
+                    if (record[at + 4] == 1) { // update_requested: update ours and say so
+                        u8 update[5] = {KEY_UPDATE, 0, 0, 1, 0};
+                        if (sendRecord(HANDSHAKE, update, sizeof(update)) < 0)
+                            return fail("couldn't answer the server's KeyUpdate", Sys::CONNECTION_RESET);
+                        expandLabel(_writeSecret, "traffic upd", nullptr, 0, next, 32);
+                        memcpy(_writeSecret, next, 32);
+                        setKeys(_write, _writeSecret);
+                    }
+                    C::wipe(next, 32);
+                } else if (record[at] != NEW_SESSION_TICKET) {
+                    return fail("the server sent an unexpected post-handshake message", Sys::INVALID_ARGUMENT);
                 }
-                (void)NEW_SESSION_TICKET;
                 at += 4 + n;
             }
             continue;
@@ -607,6 +680,7 @@ void Tls::close() {
     }
     _socket = -1;
     _closed = true;
+    forgetKeys();
 }
 
 } // namespace Kapala

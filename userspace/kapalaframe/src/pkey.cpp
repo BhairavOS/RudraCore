@@ -221,8 +221,14 @@ bool rsaOpen(u8 const* n, u64 nLength, u8 const* e, u64 eLength, u8 const* signa
         n++;
         nLength--;
     }
-    if (nLength < 128 or nLength > 512 or eLength == 0 or eLength > 8 or signatureLength != nLength or
-        not mod.init(n, nLength))
+    while (eLength and *e == 0) {
+        e++;
+        eLength--;
+    }
+    // At least 2048 bits (1024-bit RSA is breakable), and an odd exponent of
+    // at least 3 (e = 1 would make every message its own signature).
+    if (nLength < 256 or nLength > 512 or eLength == 0 or eLength > 8 or (e[eLength - 1] & 1) == 0 or
+        (eLength == 1 and e[0] < 3) or signatureLength != nLength or not mod.init(n, nLength))
         return false;
     Limbs s;
     if (not fromBytes(s, mod.k, signature, signatureLength) or compare(s, mod.m, mod.k) >= 0)

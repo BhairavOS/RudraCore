@@ -37,8 +37,14 @@ void printSize(uint64_t bytes);
 
 // Kernel fallback: while armed, fail() doesn't leave the loader. It frees
 // every page allocated since arming and jumps back to where
-// __builtin_setjmp(fallbackPoint) was called, to try another entry.
-extern void* fallbackPoint[5];
+// saveContext(fallbackPoint) was called, which then returns 1, to try
+// another entry.
+struct Context {
+    uint64_t registers[10]; // rbx rbp rdi rsi r12-r15 (callee-saved, Microsoft ABI), rsp, return address
+};
+extern Context fallbackPoint;
+extern "C" [[gnu::returns_twice]] int saveContext(Context* context); // 0, then 1 after restoreContext
+extern "C" [[noreturn]] void restoreContext(Context* context);
 void armFallback();
 void disarmFallback();
 

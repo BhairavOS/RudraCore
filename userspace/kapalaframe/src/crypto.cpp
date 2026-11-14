@@ -141,6 +141,10 @@ void hmacSha256(void const* key, u64 keyLength, void const* data, u64 length, u8
     outer.update(innerHash, 32);
     outer.finish(out);
     wipe(k, sizeof(k));
+    wipe(pad, sizeof(pad));
+    wipe(innerHash, sizeof(innerHash));
+    wipe(&inner, sizeof(inner)); // (the hash states hold key-derived values)
+    wipe(&outer, sizeof(outer));
 }
 
 void hkdfExtract(void const* salt, u64 saltLength, void const* ikm, u64 ikmLength, u8 prk[32]) {
@@ -153,6 +157,11 @@ void hkdfExtract(void const* salt, u64 saltLength, void const* ikm, u64 ikmLengt
 }
 
 void hkdfExpand(u8 const prk[32], void const* info, u64 infoLength, u8* out, u64 length) {
+    // RFC 5869: at most 255 blocks; and `info` must fit the buffer below.
+    if (infoLength > 256 or length > 255 * 32) {
+        wipe(out, length > 255 * 32 ? 0 : length);
+        return; // (no caller asks for this: the TLS labels are under 110 bytes)
+    }
     u8 t[32];
     u64 tLength = 0;
     u8 buffer[32 + 256 + 1];
@@ -167,6 +176,8 @@ void hkdfExpand(u8 const prk[32], void const* info, u64 infoLength, u8* out, u64
         out += n;
         length -= n;
     }
+    wipe(t, sizeof(t));
+    wipe(buffer, sizeof(buffer));
 }
 
 // MARK: SHA-512 / SHA-384

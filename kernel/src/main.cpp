@@ -334,8 +334,16 @@ extern "C" [[noreturn]] void kmain(u64 bootMagic, u64 bootInfo) {
 
     Time::init();
     Random::init(Time::unixTime() ^ (reinterpret_cast<u64>(&info) << 17));
-    log("[rand] random numbers from ", Random::hasHardwareSource() ? "RDRAND and " : "",
-        "cycle-counter timing");
+    {
+        auto h = Random::health();
+        log("[rand] health: ChaCha20 known answer ", h.knownAnswer ? "ok" : "WRONG", ", RDRAND ",
+            h.hardwareInUse ? "ok" : h.hardwareFailed ? "FAILED (not used)" : "absent", ", cycle-counter source ",
+            h.jitterHealthy ? "ok" : "FAILED");
+        if (h.ready)
+            log("[rand] random numbers from ", h.hardwareInUse ? "RDRAND and " : "", "cycle-counter timing");
+        else
+            log("[rand] no healthy entropy source: programs get no random numbers (TLS fails closed)");
+    }
     Sched::init();
     Programs::init(info);
     Syscall::init(info);

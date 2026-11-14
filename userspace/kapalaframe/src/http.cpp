@@ -115,10 +115,20 @@ long fetchOnce(Net& net, Address const& a, int& status, char* location, u64 loca
         }
         long n = a.secure ? tls.receive(raw + used, capacity - used, 20000)
                           : net.receive(socket, raw + used, capacity - used, 20000);
-        if (n <= 0)
+        if (n < 0) { // a failure isn't the end of the body
+            if (a.secure)
+                tls.close();
+            else
+                net.close(socket);
+            delete[] raw;
+            error = a.secure and tls.error()[0] ? tls.error() : "the download was cut short";
+            return n;
+        }
+        if (n == 0)
             break;
         used += static_cast<u64>(n);
     }
+    bool clean = not a.secure or tls.closedCleanly(); // (plain HTTP can't tell)
     if (a.secure)
         tls.close();
     else
@@ -138,7 +148,8 @@ long fetchOnce(Net& net, Address const& a, int& status, char* location, u64 loca
         return Sys::INVALID_ARGUMENT;
     }
     status = (raw[9] - '0') * 100 + (raw[10] - '0') * 10 + (raw[11] - '0');
-    bool chunked = false;
+    bool chunked = false, haveLength = false;
+    u64 contentLength = 0;
     location[0] = '\0';
     for (u64 i = 0; i < headerEnd;) {
         u64 end = i;
@@ -157,14 +168,29 @@ long fetchOnce(Net& net, Address const& a, int& status, char* location, u64 loca
         } else if (startsWith(line, "Transfer-Encoding:") and lineLength > 25) {
             for (u64 s = 18; s + 7 <= lineLength; s++)
                 chunked = chunked or startsWith(line + s, "chunked");
+        } else if (startsWith(line, "Content-Length:")) {
+            u64 s = 15;
+            while (s < lineLength and line[s] == ' ')
+                s++;
+            for (; s < lineLength and line[s] >= '0' and line[s] <= '9' and contentLength < (1ul << 40); s++) {
+                contentLength = contentLength * 10 + static_cast<u64>(line[s] - '0');
+                haveLength = true;
+            }
         }
         i = end + 1;
     }
 
+    // Truncation: the body must be complete by its own measure (chunked:
+    // the final empty chunk; Content-Length: that many bytes); otherwise,
+    // over TLS, the server must have ended with close_notify.
     u8* p = raw + headerEnd;
     u64 n = used - headerEnd;
+    bool complete = haveLength and not chunked ? n >= contentLength : clean;
+    if (haveLength and not chunked and n > contentLength)
+        n = contentLength;
     if (chunked) { // decode in place
         u64 in = 0, out = 0;
+        complete = false;
         while (in < n) {
             u64 size = 0;
             int d, digits = 0;
@@ -176,15 +202,22 @@ long fetchOnce(Net& net, Address const& a, int& status, char* location, u64 loca
             while (in < n and p[in] != '\n')
                 in++;
             in++;
-            if (not digits or size == 0)
+            if (digits and size == 0) {
+                complete = true; // the last chunk
                 break;
-            if (size > n - in)
-                size = n - in;
+            }
+            if (not digits or in > n or size > n - in)
+                break; // cut short (complete stays false)
             memmove(p + out, p + in, size);
             out += size;
             in += size + 2;
         }
         n = out;
+    }
+    if (not complete) {
+        delete[] raw;
+        error = "the download was cut short (or the server closed without saying so)";
+        return Sys::CONNECTION_RESET;
     }
     body = new u8[n ? n : 1];
     memcpy(body, p, n);

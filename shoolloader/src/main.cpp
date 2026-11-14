@@ -235,7 +235,7 @@ extern "C" Efi::Status efiMain(Efi::Handle image, Efi::SystemTable* systemTable)
     static uint32_t index;
     static bool tried[Config::MAX_ENTRIES];
     index = chooseEntry(config, diagnostic);
-    if (__builtin_setjmp(fallbackPoint)) {
+    if (saveContext(&fallbackPoint)) {
         int next = config.entries[index].fallback;
         for (uint32_t steps = 0; next >= 0 and (tried[next] or not usable(config.entries[next])) and
                                  steps < Config::MAX_ENTRIES;

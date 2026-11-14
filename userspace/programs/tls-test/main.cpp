@@ -257,6 +257,95 @@ void certificateFailures(Net& net) {
     ok = ok and good;
 }
 
+// TLS 1.3 negative tests, against scripts/tls-negative.sh on the build
+// machine (only when it runs: it serves its test authority over HTTP).
+// Each port is one scenario; only the control may succeed.
+void negativeTests(Net& net) {
+    unsigned char* ca = nullptr;
+    unsigned long caSize = 0;
+    char const* why = "";
+    if (httpGet(net, "http://10.0.2.2:8080/tls/ca.bin", ca, caSize, why, 64 * 1024) < 0) {
+        Sys::log("tls negative check: skipped (scripts/tls-negative.sh isn't running)");
+        return;
+    }
+    struct Scenario {
+        unsigned short port;
+        char const* name;
+        bool succeeds;
+        bool download; // also fetch a page (truncation checks go through httpGet)
+    };
+    static constexpr Scenario SCENARIOS[] = {
+        {8443, "control: a good server", true, false},
+        {8444, "wrong host name", false, false},
+        {8445, "expired certificate", false, false},
+        {8446, "self-signed certificate", false, false},
+        {8447, "TLS 1.2 only", false, false},
+        {8448, "certificate for client authentication only (EKU)", false, false},
+        {8449, "intermediate that isn't a CA", false, false},
+        {8450, "1024-bit RSA key", false, false},
+        {8451, "no key exchange group in common (P-256 only)", false, false},
+        {8452, "asks for a client certificate", false, false},
+        {8453, "only a cipher we don't offer", false, false},
+        {8454, "a byte flipped in ServerHello", false, false},
+        {8455, "a byte flipped in an encrypted record", false, false},
+        {8456, "a record header changed", false, false},
+        {8457, "plaintext handshake injected after ServerHello", false, false},
+        {8458, "response cut short without close_notify", false, true},
+        {8459, "control: the same page in full", true, true},
+    };
+    unsigned address = 0;
+    net.resolve("10.0.2.2", address);
+    int passed = 0, total = 0;
+    for (Scenario const& s : SCENARIOS) {
+        bool succeeded;
+        Text<120> detail;
+        if (s.download) {
+            long socket = net.tcpConnect(address, s.port);
+            Tls tls;
+            tls.useRoots(ca);
+            succeeded = socket >= 0 and tls.connect(net, socket, "bhairav.test") == Sys::OK;
+            if (succeeded) {
+                char const request[] = "GET / HTTP/1.1\r\nHost: bhairav.test\r\nConnection: close\r\n\r\n";
+                tls.send(request, sizeof(request) - 1);
+                static char page[8192];
+                unsigned long got = 0;
+                for (long n; (n = tls.receive(page + got, sizeof(page) - got, 5000)) > 0;)
+                    got += static_cast<unsigned long>(n);
+                succeeded = tls.closedCleanly(); // a cut-off response must not look complete
+                detail.add(got).add(" bytes, ").add(tls.closedCleanly() ? "close_notify" : "no close_notify");
+            } else {
+                detail.add(tls.error());
+            }
+            tls.close();
+        } else {
+            long socket = net.tcpConnect(address, s.port);
+            Tls tls;
+            tls.useRoots(ca);
+            succeeded = socket >= 0 and tls.connect(net, socket, "bhairav.test") == Sys::OK;
+            detail.add(succeeded ? "accepted" : tls.error());
+            tls.close();
+        }
+        total++;
+        bool right = succeeded == s.succeeds;
+        passed += right;
+        if (not right) {
+            Text<300> t;
+            t.add("tls negative check: FAILED: ").add(s.name).add(s.succeeds ? " was refused: " : " was accepted: ")
+                .add(detail.cstr());
+            Sys::log(t.cstr());
+            ok = false;
+        } else if (not s.succeeds) {
+            Text<300> t;
+            t.add("tls negative check: refused ").add(s.name).add(" (").add(detail.cstr()).add(")");
+            Sys::log(t.cstr());
+        }
+    }
+    delete[] ca;
+    Text<120> t;
+    t.add("tls negative check: ").add(passed).add(" of ").add(total).add(" scenarios behaved correctly");
+    Sys::log(t.cstr());
+}
+
 } // namespace
 
 int main() {
@@ -288,6 +377,7 @@ int main() {
     }
 
     certificateFailures(net);
+    negativeTests(net);
 
     // The download helper apps use (redirects, chunked bodies, TLS).
     unsigned char* body = nullptr;

@@ -74,7 +74,42 @@ bool armed = false;
 
 } // namespace
 
-void* fallbackPoint[5];
+Context fallbackPoint;
+
+// setjmp/longjmp for the Microsoft x64 ABI (the loader uses no SSE, so no
+// xmm registers need saving). rcx is the Context.
+asm(R"(
+    .globl saveContext
+saveContext:
+    movq %rbx, 0(%rcx)
+    movq %rbp, 8(%rcx)
+    movq %rdi, 16(%rcx)
+    movq %rsi, 24(%rcx)
+    movq %r12, 32(%rcx)
+    movq %r13, 40(%rcx)
+    movq %r14, 48(%rcx)
+    movq %r15, 56(%rcx)
+    leaq 8(%rsp), %rdx
+    movq %rdx, 64(%rcx)
+    movq (%rsp), %rdx
+    movq %rdx, 72(%rcx)
+    xorl %eax, %eax
+    ret
+
+    .globl restoreContext
+restoreContext:
+    movq 0(%rcx), %rbx
+    movq 8(%rcx), %rbp
+    movq 16(%rcx), %rdi
+    movq 24(%rcx), %rsi
+    movq 32(%rcx), %r12
+    movq 40(%rcx), %r13
+    movq 48(%rcx), %r14
+    movq 56(%rcx), %r15
+    movq 64(%rcx), %rsp
+    movl $1, %eax
+    jmpq *72(%rcx)
+)");
 
 void armFallback() {
     trackedCount = 0;
@@ -99,7 +134,7 @@ void fail(char const* what, Efi::Status status) {
         trackedCount = 0;
         print("\n");
         bootServices->stall(1500 * 1000);
-        __builtin_longjmp(fallbackPoint, 1);
+        restoreContext(&fallbackPoint);
     }
     print("\n\nPress a key, or wait 30 seconds, to go back to the firmware:\n"
           "it tries the next boot option (a recovery medium, another system).\n");
