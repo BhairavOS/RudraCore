@@ -228,6 +228,16 @@ int main() {
         checkIpc();
     }
 
+    // The ACPI server runs the firmware's AML, with only firmware handles
+    // (never in safe mode: it's firmware code, and safe mode is the minimum).
+    if (info.bootMode != Sys::BOOT_SAFE) {
+        Sys::restrictRights(Sys::INIT_HANDLE_FIRMWARE, Sys::RIGHT_READ | Sys::RIGHT_WRITE);
+        Sys::restrictRights(Sys::INIT_HANDLE_FIRMWARE_PORTS, Sys::RIGHT_READ | Sys::RIGHT_WRITE);
+        Sys::Handle acpi[] = {Sys::INIT_HANDLE_FIRMWARE, Sys::INIT_HANDLE_FIRMWARE_PORTS};
+        if (Sys::spawn("acpi", acpi, 2) < 0)
+            Sys::log("no ACPI server (no ACPI tables, or acpi.elf is missing)");
+    }
+
     Channel files = startStorage();
     // fs-test also checks the scopes: one connection of each kind.
     using Protocol::Fs::Scope;

@@ -17,6 +17,7 @@
 //   Resize(w, h) + new memory       ->   (the window now uses the new pixels)
 //   Launch(program, argument)       ->   (starts another app, built-in or installed)
 //   AppsChanged                     ->   (after installing or removing an app)
+//   Power(x: 0 off, 1 restart)      ->   (the Terminal's shutdown and reboot)
 //                                    <- Close (the user clicked x)
 //   (exits: the channel closes and the window goes away)
 
@@ -30,6 +31,7 @@ enum class Type : unsigned char {
     Resize = 4,       // w, h; attached: shared memory with the new pixels
     Launch = 5,       // title: program name (up to 23 characters), argument at title + 24
     AppsChanged = 6,  // apps were installed or removed: look again
+    Power = 7,        // x: 0 shut down, 1 restart (honoured only from the Terminal)
 
     // Shell -> app
     Opened = 10,

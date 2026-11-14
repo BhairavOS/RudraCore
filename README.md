@@ -378,6 +378,7 @@ The library every program links against (`userspace/kapalaframe/`):
 | `boot/shool.cfg` | ShoolLoader🔱 configuration: kernel, programs, screen mode |
 | `boot/limine.conf` | Limine configuration, for legacy BIOS boot |
 | `apps/` | Third-party example apps and the guide to making apps |
+| `third_party/uacpi/` | uACPI 7.0.0, the AML interpreter the `acpi` server runs (vendored, MIT) |
 | `tools/` | Build-machine tools (`bpk`: makes packages; `serve`: serves a repository) |
 | `legacy/` | Earlier sources, kept for reference, not built |
 
@@ -442,4 +443,5 @@ multi-core.
 
 GPL-3.0. See `LICENSE`. The boot console font is Terminus (SIL Open Font
 License), embedded from the toolchain image. The interface fonts are
-DejaVu (Bitstream Vera license, see `assets/DEJAVU-LICENSE`).
+DejaVu (Bitstream Vera license, see `assets/DEJAVU-LICENSE`). The ACPI
+interpreter is uACPI (MIT, see `third_party/uacpi/LICENSE`).

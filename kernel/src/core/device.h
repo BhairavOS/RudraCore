@@ -42,10 +42,32 @@ struct Irq : public Object {
 struct IoPorts : public Object {
     u16 base;
     u16 count;
+    // The firmware range (the acpi server's): every port except those the
+    // kernel and drivers own (PICs and their trigger registers, PIT, PS/2,
+    // CMOS clock, PCI configuration, serial).
+    bool firmware = false;
 
-    IoPorts(u16 base, u16 count) : Object(ObjectType::IoPorts), base(base), count(count) {}
+    IoPorts(u16 base, u16 count, bool firmware = false)
+        : Object(ObjectType::IoPorts), base(base), count(count), firmware(firmware) {}
 
-    bool contains(u16 port) const { return port >= base and port - base < count; }
+    bool contains(u16 port) const {
+        if (port < base or port - base >= count)
+            return false;
+        if (not firmware)
+            return true;
+        bool owned = (port >= 0x20 and port <= 0x21) or (port >= 0xA0 and port <= 0xA1) or
+                     (port >= 0x40 and port <= 0x43) or port == 0x60 or port == 0x64 or
+                     (port >= 0x70 and port <= 0x71) or (port >= 0x4D0 and port <= 0x4D1) or
+                     (port >= 0xCF8 and port <= 0xCFF) or (port >= 0x3F8 and port <= 0x3FF);
+        return not owned;
+    }
+};
+
+// What firmware code (ACPI's AML) needs: physical memory that isn't RAM
+// (tables, chipset registers) and PCI configuration space. Held by the
+// acpi server only (init gets it; apps never can).
+struct Firmware : public Object {
+    Firmware() : Object(ObjectType::Firmware) {}
 };
 
 // A PCI device handed to a userspace driver. Through it the driver can map

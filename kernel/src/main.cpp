@@ -1,3 +1,4 @@
+#include "arch/x86_64/acpi.h"
 #include "arch/x86_64/fpu.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
@@ -224,9 +225,9 @@ void faultTest() {
 // Starts init, the root of userspace, and hands it the hardware: it decides
 // which driver gets what. The kernel itself never starts other programs.
 void startInit(Boot::Info const& info) {
-    Core::Object* handles[7] = {};
+    Core::Object* handles[9] = {};
     // init gets every right; it hands each driver only the ones it needs.
-    Core::Capability caps[7];
+    Core::Capability caps[9];
 
     if (info.hasFramebuffer) {
         auto const& fb = info.framebuffer;
@@ -274,9 +275,15 @@ void startInit(Boot::Info const& info) {
 
     Abi::Error code;
     char const* error = nullptr;
-    for (usize i = 0; i < 7; i++)
+    // Firmware access, for the acpi server (AML needs it): only with ACPI.
+    if (info.acpiRsdp) {
+        handles[Abi::INIT_HANDLE_FIRMWARE - 1] = new Core::Firmware();
+        handles[Abi::INIT_HANDLE_FIRMWARE_PORTS - 1] = new Core::IoPorts(0, 0xFFFF, true);
+    }
+
+    for (usize i = 0; i < 9; i++)
         caps[i] = {handles[i], Abi::RIGHTS_ALL, 0};
-    Core::Task* init = Programs::start("init", 4, caps, 7, code, error);
+    Core::Task* init = Programs::start("init", 4, caps, 9, code, error);
     if (not init)
         panic("can't start init: is init.elf in the boot image?");
     init->privilege = Core::Privilege::Root;
@@ -325,6 +332,8 @@ extern "C" [[noreturn]] void kmain(u64 bootMagic, u64 bootInfo) {
 
     testMemory();
     testHeap();
+    Arch::Acpi::init(info);
+    Arch::Acpi::report(info.diagnostic);
     Arch::Iommu::init(info); // before any driver can turn on a device's DMA
 
     if constexpr (RUDRACORE_PANIC_TEST) {

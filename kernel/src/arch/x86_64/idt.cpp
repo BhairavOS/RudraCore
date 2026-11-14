@@ -4,6 +4,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/frame.h"
 #include "arch/x86_64/gdt.h"
+#include "arch/x86_64/apic.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/protect.h"
 #include "core/device.h"
@@ -194,6 +195,9 @@ extern "C" Frame* interruptDispatch(Frame* frame) {
         Pic::endOfInterrupt(irq);
         return frame;
     }
+
+    if (vector == Apic::SPURIOUS_VECTOR)
+        return frame; // the local APIC's spurious interrupt: no EOI
 
     if (vector == Abi::SYSCALL_VECTOR)
         return Syscall::dispatch(frame);

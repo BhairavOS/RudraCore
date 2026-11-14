@@ -57,6 +57,10 @@ public:
     // Tells the shell apps were installed or removed (kapala/apps.h).
     void appsChanged();
 
+    // Asks the shell to shut down (or restart) the machine. Only the
+    // Terminal is listened to.
+    void power(bool restart);
+
     // The window's pixels: draw here, then present().
     Gfx::Bitmap& surface() { return _surface; }
     int width() const { return _surface.width; }

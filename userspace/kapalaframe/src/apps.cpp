@@ -92,7 +92,7 @@ long removeTree(Files& files, char const* path, int depth = 0) {
 
 bool isBuiltInProgram(char const* id) {
     static constexpr char const* BUILT_IN[] = {
-        "init", "ps2", "ahci", "fs", "e1000", "rtl8139", "net", "kamalshell", "browser", "files", "terminal",
+        "init", "acpi", "ps2", "ahci", "fs", "e1000", "rtl8139", "net", "kamalshell", "browser", "files", "terminal",
         "notes", "monitor", "about", "store", "ipc-test", "protect-test", "oom-test", "harden-test", "fpu-test", "fs-test", "net-test",
         "tls-test", "fonts", "catalog", "trust", "roots"};
     for (char const* name : BUILT_IN) {

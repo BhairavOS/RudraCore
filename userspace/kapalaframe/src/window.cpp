@@ -87,6 +87,13 @@ void Window::appsChanged() {
     _shell.send(message);
 }
 
+void Window::power(bool restart) {
+    Message message{};
+    message.type = Type::Power;
+    message.x = restart ? 1 : 0;
+    _shell.send(message);
+}
+
 void Window::launch(char const* program, char const* argument) {
     Message message{};
     message.type = Type::Launch;

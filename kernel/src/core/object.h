@@ -11,6 +11,7 @@ enum class ObjectType : u8 {
     Irq,
     IoPorts,
     PciDevice,
+    Firmware, // ACPI: non-RAM physical memory and PCI configuration (the acpi server)
 };
 
 // Base of everything a handle can refer to. Reference counted: each handle,

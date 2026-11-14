@@ -4,6 +4,9 @@
 
 namespace Rudracore::Arch::Pic {
 
+// Once the APICs take over (arch/x86_64/apic.h), mask, unmask and
+// endOfInterrupt act on them instead, with the same line numbers.
+//
 // The legacy 8259 PICs deliver IRQs 0-7 on vectors 8-15 by default, which
 // collide with CPU exceptions. They are moved to 32-47 and fully masked;
 // step 3 unmasks the timer.

@@ -1,5 +1,6 @@
 #include "arch/x86_64/pic.h"
 
+#include "arch/x86_64/apic.h"
 #include "arch/x86_64/io.h"
 
 namespace Rudracore::Arch::Pic {
@@ -39,6 +40,8 @@ void init() {
 }
 
 void setLevelTriggered(u8 irq) {
+    if (Apic::active())
+        return; // (the I/O APIC's entries say it)
     if (irq < 3 or irq >= 16 or irq == 8 or irq == 13)
         return; // timer, keyboard, cascade, clock and FPU lines must stay edge-triggered
     u16 port = irq < 8 ? 0x4D0 : 0x4D1;
@@ -46,23 +49,29 @@ void setLevelTriggered(u8 irq) {
 }
 
 void unmask(u8 irq) {
+    if (Apic::active())
+        return Apic::unmask(irq);
     u16 port = irq < 8 ? MASTER_DATA : SLAVE_DATA;
     outb(port, inb(port) & ~(1 << (irq % 8)));
 }
 
 void mask(u8 irq) {
+    if (Apic::active())
+        return Apic::mask(irq);
     u16 port = irq < 8 ? MASTER_DATA : SLAVE_DATA;
     outb(port, inb(port) | (1 << (irq % 8)));
 }
 
 void endOfInterrupt(u8 irq) {
+    if (Apic::active())
+        return Apic::endOfInterrupt();
     if (irq >= 8)
         outb(SLAVE_CMD, CMD_EOI);
     outb(MASTER_CMD, CMD_EOI);
 }
 
 bool isSpurious(u8 irq) {
-    if (irq != 7 and irq != 15)
+    if (Apic::active() or (irq != 7 and irq != 15))
         return false;
 
     u16 cmd = irq == 7 ? MASTER_CMD : SLAVE_CMD;

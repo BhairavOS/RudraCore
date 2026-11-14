@@ -20,6 +20,15 @@ void init(Boot::Info const& info);
 
 bool enabled();
 
+// Whether interrupt remapping is on (then I/O APIC pins need entries).
+bool remapsInterrupts();
+
+// Lets the I/O APIC (checked by its requester id from DMAR) raise `vector`
+// on the CPU with APIC id `destination` through remapping entry `index`.
+// False if remapping is off, or there's no queued invalidation or no I/O
+// APIC device scope to check against.
+bool remapIoapicPin(u32 index, u8 vector, bool level, u8 destination);
+
 // Lets the device at `device` read and write [physical, physical + size)
 // at the same addresses. False if out of memory.
 bool allow(Pci::Address device, u64 physical, u64 size);

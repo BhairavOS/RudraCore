@@ -111,8 +111,9 @@ constexpr AppEntry APPS[] = {
 constexpr int APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 
 // The lotus menu.
-enum MenuItem { MENU_ABOUT, MENU_APPS, MENU_STORE, MENU_SEPARATOR, MENU_SHOW_DESKTOP, MENU_COUNT };
-constexpr char const* MENU_LABELS[MENU_COUNT] = {"About Bhairav OS", "All Apps", "App Store", "", "Show Desktop"};
+enum MenuItem { MENU_ABOUT, MENU_APPS, MENU_STORE, MENU_SEPARATOR, MENU_SHOW_DESKTOP, MENU_RESTART, MENU_SHUT_DOWN, MENU_COUNT };
+constexpr char const* MENU_LABELS[MENU_COUNT] = {"About Bhairav OS", "All Apps", "App Store", "", "Show Desktop",
+                                                 "Restart", "Shut Down"};
 
 // The mouse cursor: X = outline, . = fill.
 constexpr char const* CURSOR[] = {
@@ -496,6 +497,12 @@ private:
                 break;
             }
             case ShellType::AppsChanged: rescanApps(); break;
+            case ShellType::Power:
+                // Only the Terminal (a built-in) may ask; an installed app can't
+                // turn the machine off.
+                if (sameString(w.program, "terminal"))
+                    Sys::power(m.x == 1 ? Sys::POWER_RESTART : Sys::POWER_OFF);
+                break;
             default:
                 break;
             }
@@ -927,6 +934,8 @@ private:
                     minimize(i);
             }
             break;
+        case MENU_RESTART: Sys::power(Sys::POWER_RESTART); break;
+        case MENU_SHUT_DOWN: Sys::power(Sys::POWER_OFF); break;
         default: break;
         }
     }
@@ -1066,7 +1075,7 @@ private:
         return -1;
     }
 
-    Rect menuRect() const { return {8, TOPBAR_H + 4, 220, 12 + 4 * 30 + 11}; }
+    Rect menuRect() const { return {8, TOPBAR_H + 4, 220, 12 + (MENU_COUNT - 1) * 30 + 11}; }
 
     Rect menuItemRect(int k) const {
         Rect m = menuRect();

@@ -169,4 +169,25 @@ inline long deviceBar(Handle device, unsigned long index) { return syscall(SYS_D
 // Physical address of shared memory, for the device to use (DMA).
 inline long dmaAddress(Handle device, Handle memory) { return syscall(SYS_DMA_ADDRESS, device, memory); }
 
+// Firmware access (the acpi server): memory to map over non-RAM physical
+// addresses, PCI configuration space, and wide port I/O.
+inline long firmwareMemory(Handle firmware, unsigned long physical, unsigned long size) {
+    return syscall(SYS_FIRMWARE_MEMORY, firmware, physical, size);
+}
+inline long firmwarePciRead(Handle firmware, unsigned long address, unsigned width) {
+    return syscall(SYS_FIRMWARE_PCI, firmware, address, width);
+}
+inline long firmwarePciWrite(Handle firmware, unsigned long address, unsigned width, unsigned long value) {
+    return syscall(SYS_FIRMWARE_PCI, firmware, address, width | PCI_WRITE, value);
+}
+inline long portInWide(Handle ports, unsigned port, unsigned width) {
+    return syscall(SYS_PORT_IN_WIDE, ports, port, width);
+}
+inline long portOutWide(Handle ports, unsigned port, unsigned width, unsigned long value) {
+    return syscall(SYS_PORT_OUT_WIDE, ports, port, width, value);
+}
+
+// POWER_OFF or POWER_RESTART (system programs only). Returns only on failure.
+inline long power(unsigned long action) { return syscall(SYS_POWER, action); }
+
 } // namespace Kapala::Sys

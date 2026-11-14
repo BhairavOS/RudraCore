@@ -1,16 +1,19 @@
 // Intel VT-d (Intel Virtualization Technology for Directed I/O, spec rev 3+):
 // root table -> context table per bus -> per-device second-level page
-// tables, invalidated with the register interface.
+// tables. Invalidation through the register interface, or the queued
+// interface once interrupt remapping needs it (the interrupt entry cache
+// can only be flushed that way).
 
 #include "arch/x86_64/iommu.h"
 
+#include "arch/x86_64/acpi.h"
 #include "arch/x86_64/cpu.h"
 #include "log.h"
 #include "mem/memory.h"
 #include "mem/pmm.h"
 #include "mem/vmm.h"
 
-extern "C" int memcmp(void const* a, void const* b, usize n);
+
 
 namespace Rudracore::Arch::Iommu {
 
@@ -21,10 +24,11 @@ constexpr usize MAX_DOMAINS = 32;
 
 // Registers
 constexpr u64 CAP = 0x08, ECAP = 0x10, GCMD = 0x18, GSTS = 0x1C, RTADDR = 0x20, CCMD = 0x28, FSTS = 0x34,
-              IRTA = 0xB8;
+              IQH = 0x80, IQT = 0x88, IQA = 0x90, IRTA = 0xB8;
 constexpr u32 TRANSLATION_ENABLE = 1u << 31, SET_ROOT_POINTER = 1u << 30;
 constexpr u32 INTERRUPT_REMAP_ENABLE = 1u << 25, SET_INTERRUPT_TABLE = 1u << 24, COMPATIBILITY_ALLOWED = 1u << 23;
-constexpr u64 ECAP_INTERRUPT_REMAPPING = 1u << 3;
+constexpr u64 ECAP_INTERRUPT_REMAPPING = 1u << 3, ECAP_QUEUED_INVALIDATION = 1u << 1;
+constexpr u32 QUEUED_INVALIDATION_ENABLE = 1u << 26;
 constexpr u8 FIRST_INTERRUPT_FAULT = 0x20; // fault reasons 0x20-0x2F are interrupt requests
 constexpr u32 ONE_SHOT_MASK = 0x96FFFFFF; // GSTS bits that may be written back to GCMD
 
@@ -37,6 +41,8 @@ struct Unit {
     u64 iotlb; // offset of the IOTLB invalidate register
     u64 faults; // offset of the first fault recording register
     u64 faultCount;
+    u64 queue = 0; // the invalidation queue (256 descriptors), once enabled
+    u32 tail = 0;
 };
 
 struct Domain {
@@ -52,6 +58,13 @@ u64 rootTable = 0; // shared by every unit
 int levels = 0;    // 3 (39-bit addresses) or 4 (48-bit)
 bool coherent = true; // the hardware snoops our table writes (else: flush them)
 bool interruptRemapping = true; // every unit can remap interrupts (cleared when one can't)
+bool queuedInvalidation = true;  // every unit has the queued interface (cleared when one hasn't)
+bool queued = false;             // ...and it's in use
+bool remapping = false;          // interrupt remapping is on
+u64 interruptTable = 0;          // its table: 256 entries of 16 bytes
+u64 statusPage = 0;              // where invalidation-wait descriptors report completion
+bool haveIoapicSource = false;
+u16 ioapicSource = 0;            // the I/O APIC's requester id (DMAR device scope)
 
 u64 read64(Unit const& u, u64 off) { return *reinterpret_cast<u64 volatile*>(u.regs + off); }
 u32 read32(Unit const& u, u64 off) { return *reinterpret_cast<u32 volatile*>(u.regs + off); }
@@ -65,24 +78,46 @@ void flush(void const* p) {
         asm volatile("clflush (%0)" : : "r"(p) : "memory");
 }
 
-// Makes sure [physical, physical + length) is reachable in the direct map
-// (ACPI tables, registers may lie outside the RAM it covers).
-void* reach(u64 physical, u64 length, Vmm::Cache cache) {
-    auto& kernel = Vmm::kernelSpace();
-    for (u64 page = Mem::alignDown(physical, Mem::PAGE_SIZE); page < physical + length; page += Mem::PAGE_SIZE) {
-        u64 found;
-        if (not kernel.translate(Mem::hhdmOffset + page, found))
-            kernel.map(Mem::hhdmOffset + page, page, Mem::PAGE_SIZE, Vmm::READ | Vmm::WRITE, cache);
-    }
-    return Mem::toVirtual(physical);
-}
-
 void waitClear64(Unit const& u, u64 off, u64 bit) {
     for (int i = 0; i < 10000000 and (read64(u, off) & bit); i++)
         asm volatile("pause");
 }
 
+// Queued invalidation: descriptors into the unit's ring, then a wait
+// descriptor that writes 1 to the status page when all before it are done.
+void submit(Unit& u, u64 low, u64 high) {
+    u64* q = table(u.queue);
+    q[2 * u.tail] = low;
+    q[2 * u.tail + 1] = high;
+    u.tail = (u.tail + 1) % 256;
+    write64(u, IQT, static_cast<u64>(u.tail) << 4);
+}
+
+void waitForQueue(Unit& u) {
+    auto* status = Mem::toVirtual<u32 volatile>(statusPage);
+    *status = 0;
+    submit(u, 0x5 | (1ull << 5) | (1ull << 32), statusPage); // wait, write 1 to the status page
+    for (int i = 0; i < 10000000 and *status != 1; i++)
+        asm volatile("pause");
+}
+
+// The interrupt entry cache (after an interrupt remapping entry changes).
+void invalidateInterruptEntries() {
+    for (usize i = 0; i < unitCount and queued; i++) {
+        submit(units[i], 0x4, 0); // global
+        waitForQueue(units[i]);
+    }
+}
+
 void invalidateAll() {
+    if (queued) {
+        for (usize i = 0; i < unitCount; i++) {
+            submit(units[i], 0x1 | (1ull << 4), 0);                           // context cache, global
+            submit(units[i], 0x2 | (1ull << 4) | (1ull << 6) | (1ull << 7), 0); // IOTLB, global, drain
+            waitForQueue(units[i]);
+        }
+        return;
+    }
     for (usize i = 0; i < unitCount; i++) {
         Unit const& u = units[i];
         write64(u, CCMD, (1ull << 63) | (1ull << 61)); // context cache, global
@@ -97,26 +132,6 @@ void setCommand(Unit const& u, u32 bit) {
     write32(u, GCMD, status | bit);
     for (int i = 0; i < 10000000 and not(read32(u, GSTS) & bit); i++)
         asm volatile("pause");
-}
-
-// The ACPI table with this signature, or nullptr.
-u8 const* findTable(u64 rsdp, char const* signature) {
-    auto const* r = static_cast<u8 const*>(reach(rsdp, 36, Vmm::Cache::WriteBack));
-    if (memcmp(r, "RSD PTR ", 8) != 0)
-        return nullptr;
-    bool xsdt = r[15] >= 2;
-    u64 sdt = xsdt ? *reinterpret_cast<u64 const*>(r + 24) : *reinterpret_cast<u32 const*>(r + 16);
-    auto const* header = static_cast<u8 const*>(reach(sdt, 36, Vmm::Cache::WriteBack));
-    u32 length = *reinterpret_cast<u32 const*>(header + 4);
-    header = static_cast<u8 const*>(reach(sdt, length, Vmm::Cache::WriteBack));
-    u64 entry = xsdt ? 8 : 4;
-    for (u64 at = 36; at + entry <= length; at += entry) {
-        u64 address = xsdt ? *reinterpret_cast<u64 const*>(header + at) : *reinterpret_cast<u32 const*>(header + at);
-        auto const* t = static_cast<u8 const*>(reach(address, 36, Vmm::Cache::WriteBack));
-        if (memcmp(t, signature, 4) == 0)
-            return static_cast<u8 const*>(reach(address, *reinterpret_cast<u32 const*>(t + 4), Vmm::Cache::WriteBack));
-    }
-    return nullptr;
 }
 
 // The leaf entry for `address` in a domain's page table, made if `create`.
@@ -175,7 +190,7 @@ Domain* domainFor(Pci::Address a) {
 } // namespace
 
 void init(Boot::Info const& info) {
-    u8 const* dmar = info.acpiRsdp ? findTable(info.acpiRsdp, "DMAR") : nullptr;
+    u8 const* dmar = info.acpiRsdp ? Acpi::find("DMAR") : nullptr;
     if (not dmar) {
         log("[iommu] no VT-d (no ACPI DMAR table): drivers' devices can reach all memory");
         return;
@@ -190,7 +205,7 @@ void init(Boot::Info const& info) {
         if (type == 0 and unitCount < MAX_UNITS) { // DRHD: one remapping unit
             u64 base = *reinterpret_cast<u64 const*>(dmar + at + 8);
             Unit& u = units[unitCount++];
-            u.regs = static_cast<u8 volatile*>(reach(base, 2 * Mem::PAGE_SIZE, Vmm::Cache::Uncached));
+            u.regs = static_cast<u8 volatile*>(Acpi::map(base, 2 * Mem::PAGE_SIZE, Vmm::Cache::Uncached));
             u64 cap = read64(u, CAP), ecap = read64(u, ECAP);
             u.iotlb = ((ecap >> 8) & 0x3FF) * 16;
             u.faults = ((cap >> 24) & 0x3FF) * 16;
@@ -198,6 +213,19 @@ void init(Boot::Info const& info) {
             sagaw &= static_cast<int>((cap >> 8) & 0x1F);
             coherent = coherent and (ecap & 1);
             interruptRemapping = interruptRemapping and (ecap & ECAP_INTERRUPT_REMAPPING);
+            queuedInvalidation = queuedInvalidation and (ecap & ECAP_QUEUED_INVALIDATION);
+            // Device scopes: the I/O APIC's requester id, for remapping its pins.
+            for (u32 scope = at + 16; scope + 8 <= at + size;) {
+                u8 scopeType = dmar[scope], scopeLength = dmar[scope + 1];
+                if (scopeLength < 8 or scope + scopeLength > at + size)
+                    break;
+                if (scopeType == 3 and not haveIoapicSource) { // I/O APIC: bus, then (device, function)
+                    u8 bus = dmar[scope + 5], device = dmar[scope + 6], function = dmar[scope + 7];
+                    ioapicSource = static_cast<u16>(bus << 8 | device << 3 | function);
+                    haveIoapicSource = true;
+                }
+                scope += scopeLength;
+            }
         }
         at += size;
     }
@@ -211,6 +239,17 @@ void init(Boot::Info const& info) {
     for (usize i = 0; i < unitCount; i++) {
         write64(units[i], RTADDR, rootTable);
         setCommand(units[i], SET_ROOT_POINTER);
+    }
+    // The queued interface, when interrupt remapping will need it.
+    statusPage = interruptRemapping and queuedInvalidation ? Pmm::allocZeroed() : 0;
+    for (usize i = 0; i < unitCount and statusPage; i++) {
+        units[i].queue = Pmm::allocZeroed();
+        if (not units[i].queue)
+            break;
+        write64(units[i], IQT, 0);
+        write64(units[i], IQA, units[i].queue); // 256 descriptors (size field 0)
+        setCommand(units[i], QUEUED_INVALIDATION_ENABLE);
+        queued = true;
     }
     invalidateAll();
     for (usize i = 0; i < unitCount; i++)
@@ -226,7 +265,7 @@ void init(Boot::Info const& info) {
     // messages stay blocked (GCMD.CFI clear). Each blocked one is logged.
     // shortcut: no entries yet; when a driver uses MSI, give its device
     // entries with source-id checking (SVT/SID) instead of blocking all.
-    u64 interruptTable = interruptRemapping ? Pmm::allocZeroed() : 0; // 256 entries of 16 bytes
+    interruptTable = interruptRemapping ? Pmm::allocZeroed() : 0;
     if (not interruptTable) {
         log("[iommu] no interrupt remapping: a device could still send interrupt messages (MSI)");
         return;
@@ -239,8 +278,8 @@ void init(Boot::Info const& info) {
         u32 status = read32(units[i], GSTS);
         on = on and (status & INTERRUPT_REMAP_ENABLE) and not(status & COMPATIBILITY_ALLOWED);
     }
-    // (The interrupt entry cache needs no flush: remapping was off until
-    // now, and the table never changes.)
+    invalidateInterruptEntries();
+    remapping = on;
     if (on)
         log("[iommu] interrupt remapping on: devices can't send interrupt messages (all interrupts use the PIC)");
     else
@@ -249,6 +288,22 @@ void init(Boot::Info const& info) {
 
 bool enabled() {
     return unitCount > 0;
+}
+
+bool remapsInterrupts() { return remapping; }
+
+bool remapIoapicPin(u32 index, u8 vector, bool level, u8 destination) {
+    if (not remapping or not queued or not haveIoapicSource or index >= 256)
+        return false;
+    InterruptGuard guard;
+    u64* e = table(interruptTable) + 2 * index;
+    // High half first: only the I/O APIC (requester id checked, SVT = 1) may
+    // use this entry. Then the low half, present last.
+    e[1] = ioapicSource | (1ull << 18);
+    e[0] = 1 | (level ? 1ull << 4 : 0) | static_cast<u64>(vector) << 16 | static_cast<u64>(destination) << 40;
+    flush(e);
+    invalidateInterruptEntries();
+    return true;
 }
 
 bool allow(Pci::Address device, u64 physical, u64 size) {

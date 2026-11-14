@@ -388,3 +388,44 @@ Reviewed this round, line by line: `tls.cpp`, `x509.cpp`, the RSA/ECDSA code in 
 - The RNG tests assume 1 bit of entropy per cycle-counter sample. That's an estimate, not a measured min-entropy. Without RDRAND (QEMU's default CPU), early-boot randomness rests on timing alone.
 - A KeyUpdate split across records, or several messages straddling records after the handshake, is refused rather than reassembled.
 - The negative tests run only when the harness is running (`make tls-negative`). A normal boot logs "skipped".
+
+## 16. ACPI
+
+One module, `arch/x86_64/acpi.{h,cpp}`, replaces the IOMMU's private table walk.
+
+| Item | Design | Checked by |
+|---|---|---|
+| RSDP discovery | From the loader (UEFI configuration table, or Limine). Checked: signature, the ACPI 1.0 checksum (20 bytes), and on 2.0+ the extended checksum (36 bytes). | Both firmware types. |
+| XSDT/RSDT | The XSDT on ACPI 2.0+, else the RSDT. A damaged XSDT falls back to the RSDT. Every table is mapped, its length bounded (36 bytes to 16 MiB) and its checksum checked before use; a bad one is skipped and counted. | SeaBIOS (ACPI 1.0, RSDT, 6 tables) and OVMF (XSDT, 7 tables): "checksums ok". |
+| MADT | Local APIC address (and its 64-bit override), PCAT_COMPAT, enabled CPUs (local APIC and x2APIC entries), I/O APICs, and interrupt source overrides (ISA IRQ → GSI). | OVMF: local APIC 0xfee00000, I/O APIC 0xfec00000, 5 overrides, IRQ0 → GSI 2, 8259s present. With `-smp 2`: 2 CPUs. |
+| FADT | SCI, SMI command and ACPI_ENABLE, PM1a/b control blocks (the extended GAS fields win when they're I/O), the PM timer (24/32-bit), the reset register and value, X_DSDT, IA-PC boot flags (8042, VGA, MSI, CMOS RTC), and hardware-reduced. | SCI 9, PM1a 0x604, PM timer 0x608, reset supported, 8042 present. |
+| HPET | Base address (memory space only), then its own capabilities register: tick period (accepted only if 1 fs to 100 ns), timers, 64-bit counter. | 3 timers, 100 MHz, 64-bit. |
+| MCFG | ECAM ranges: base, segment, bus range (an inverted range is dropped). PCI configuration still goes through ports 0xCF8/0xCFC. | Segment 0, buses 0-255 at 0xe0000000. |
+| DMAR | Now found (checksum-checked) through `Acpi::find`. | VT-d boots as before (§10, §12). |
+| SRAT where required | Processor (local APIC, x2APIC) and memory affinity entries, enabled ones only: domains, CPUs, ranges, bytes. Reported. The kernel is single-CPU and doesn't place memory by domain yet. | QEMU with 2 NUMA nodes: "2 NUMA domains, 2 CPUs, 3 memory ranges, 255 MiB". |
+| Power management | Shutdown: S5, with SLP_TYPa/b read from the DSDT's `Name(_S5, Package…)`. It switches to ACPI mode (SMI_CMD ← ACPI_ENABLE, waits for SCI_EN) if needed, then writes SLP_TYP\|SLP_EN to PM1a (and PM1b). Restart: the FADT reset register, then the 8042, then a triple fault. `SYS_POWER` (new) refuses apps (ACCESS_DENIED). KamalShell offers Restart and Shut Down in the lotus menu, and does what the Terminal's `shutdown`/`reboot` ask, ignoring that request from any other program. | Terminal `shutdown`: "powering off (S5)", and QEMU exits by itself. `reboot`: the kernel starts a second time. |
+| Battery and thermal information | Without an AML interpreter, `_BST`/`_BIF`/`_TMP` can't be evaluated. The kernel reports what the DSDT/SSDTs declare: battery devices (EisaId PNP0C0A) and ThermalZone objects. | QEMU: 0 and 0, reported as "readings need an AML interpreter: not available". |
+
+**Limits.**
+- No AML interpreter: no battery or thermal readings, no sleep states other than S5, no `_PTS` before S5, no `_PRT` interrupt routing (devices keep using the legacy PIC). `_S5` is found by pattern, which covers the common encodings (ZeroOp, OneOp, BytePrefix).
+- Hardware-reduced ACPI machines (no PM1 blocks) can't be powered off this way, and the log says so.
+- Before powering off, nothing is told to close: the fs server writes every change before it replies, so no data waits in memory, but open apps aren't asked to save.
+- The parsed MADT, HPET, MCFG and SRAT data isn't used yet (PIC, PIT and port-based PCI configuration stay). It's in place for an APIC, HPET or ECAM switch.
+- Damaged-table handling (skip and count) was checked by code review only: QEMU fixes the checksums of the tables it builds.
+
+## 17. The ACPI server (AML interpreter)
+
+Step 1 of 4 toward APIC interrupts, battery and thermal readings, and sleep: the firmware's AML now runs, in userspace.
+
+| Item | Design | Checked by |
+|---|---|---|
+| Interpreter | uACPI 7.0.0 (MIT, released 2026-10-16), vendored in `third_party/uacpi` (its `source/` and `include/`, plus its LICENSE) and linked only into `userspace/programs/acpi`. The server implements uACPI's host interface on Bhairav's syscalls. It's single-threaded: semaphores are counters, spinlocks do nothing, and queued work runs at once. It keeps a cache of up to 24 physical mappings (a program may hold 32). | SeaBIOS and OVMF: QEMU's DSDT loads (1705 ops in about 12 ms), 36 devices, 261 namespace objects. |
+| Isolation | AML is the firmware vendor's code and can name any I/O port or physical address, so it runs outside the kernel, behind two capabilities only init gets (only when there's ACPI) and only the server receives (never in safe mode). **Firmware** (`SYS_FIRMWARE_MEMORY`) maps physical memory that isn't RAM, kernel, loader or screen memory (write-back for ACPI tables, uncached otherwise), and gives PCI configuration space (`SYS_FIRMWARE_PCI`, segment 0). **Firmware ports** cover every port except the ones the kernel and drivers own: PICs and their trigger registers, PIT, PS/2, CMOS clock, PCI configuration, serial. 16- and 32-bit port I/O was added for it (`SYS_PORT_IN_WIDE`/`OUT_WIDE`). Both are "hardware" objects, so apps can never receive them. | Each start: "firmware access limits hold": the PIC's port and a page of RAM are refused. |
+| What it proves | `\_S5` evaluated (not pattern-matched); the PCI root bridge's `_PRT`; battery (PNP0C0A), AC adapter (ACPI0003), power button (PNP0C0C) and thermal zones found through the namespace, `_STA` respected. | QEMU: `\_S5` = 0, 0 (agrees with the kernel's pattern match); `_PRT` has 128 entries, all through link devices (we're in PIC mode); no battery, AC, power button or thermal zone (QEMU has none). |
+
+**Next (not done yet).**
+1. APIC: local APIC and I/O APIC drivers (MADT already parsed), `\_PIC(1)`, `_PRT` routing for PCI devices, ISA overrides, the APIC timer calibrated by the HPET. Then the 8259s get masked.
+2. Events: the SCI interrupt (installing the handler is accepted but not wired), GPEs and the power button, the embedded controller, `_BIF`/`_BIX`/`_BST` battery and `_TMP`/`_CRT` thermal readings (tested in QEMU with a test SSDT via `-acpitable`), shown in KamalShell.
+3. Sleep: S5 through uACPI (`_PTS` first), then S3 with a FACS waking vector and driver suspend/resume.
+
+**Limits now.** The kernel's own power-off still uses its pattern-matched `\_S5` (it will move to the server). Short stalls (`uacpi_kernel_stall`) spin a rough count, because the clock counts milliseconds. A 1- or 2-byte PCI config write is a read-modify-write of the dword. A semaphore wait that would block returns a timeout (one thread: nobody could signal it).

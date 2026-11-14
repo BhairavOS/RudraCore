@@ -52,6 +52,14 @@ USER_PROGRAMS := $(notdir $(wildcard userspace/programs/*))
 USER_ELFS := $(USER_PROGRAMS:%=$(BUILD)/user/%.elf)
 USER_OBJS := $(KAPALA_OBJS) $(patsubst %,$(BUILD)/%.o,$(shell find userspace/programs -name '*.cpp' -o -name '*.S'))
 
+# uACPI (third_party/uacpi, C): the AML interpreter, linked into the acpi
+# server only. Third-party code: warnings aren't errors here.
+UACPI_SRCS := $(wildcard third_party/uacpi/source/*.c)
+UACPI_OBJS := $(UACPI_SRCS:%.c=$(BUILD)/%.c.o)
+UACPI_CFLAGS := --target=x86_64-unknown-none-elf -std=c11 -O2 -ffreestanding -fno-stack-protector -fno-PIC \
+	-msse2 -Ithird_party/uacpi/include -MMD -MP
+USER_CXXFLAGS += -Ithird_party/uacpi/include
+
 # Objects of one user program: $(call programObjs,init)
 programObjs = $(patsubst %,$(BUILD)/%.o,$(shell find userspace/programs/$(1) -name '*.cpp' -o -name '*.S'))
 
@@ -216,6 +224,12 @@ $(BUILD)/userspace/%.S.o: userspace/%.S $(BUILD)/font.psf $(BUILD)/logo.rgba
 $(BUILD)/user/%.elf: $(KAPALA_OBJS) userspace/link.ld $$(call programObjs,$$*)
 	@mkdir -p $(@D)
 	$(LD) $(USER_LDFLAGS) $(filter %.o,$^) -o $@
+
+$(BUILD)/third_party/uacpi/%.c.o: third_party/uacpi/%.c
+	@mkdir -p $(@D)
+	clang $(UACPI_CFLAGS) -c $< -o $@
+
+$(BUILD)/user/acpi.elf: $(UACPI_OBJS)
 
 # ShoolLoader objects
 $(BUILD)/shoolloader/%.obj: shoolloader/%.cpp
@@ -486,4 +500,4 @@ shot: $(ISO) $(DISK)
 clean:
 	rm -rf $(BUILD)
 
--include $(OBJS:.o=.d) $(USER_OBJS:.o=.d) $(SHOOL_OBJS:.obj=.d) $(APP_OBJS:.o=.d)
+-include $(OBJS:.o=.d) $(USER_OBJS:.o=.d) $(SHOOL_OBJS:.obj=.d) $(APP_OBJS:.o=.d) $(UACPI_OBJS:.o=.d)

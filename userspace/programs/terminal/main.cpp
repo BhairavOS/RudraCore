@@ -321,10 +321,14 @@ private:
         if (same(cmd, "help")) {
             print("Files:   ls [folder]  cd folder  pwd  cat file  write file text...  mkdir folder  rm path", OUTPUT);
             print("Network: ip  ping host [count]  host name  get http(s)://address", OUTPUT);
-            print("System:  date  uptime  mem  echo text...  clear", OUTPUT);
+            print("System:  date  uptime  mem  echo text...  clear  shutdown  reboot", OUTPUT);
             print("Apps:    open app  edit file  browse address  apps", OUTPUT);
             print("Packages: apt update | search | list | show | install | remove | upgrade | verify", OUTPUT);
             print("          apt add-repo address | remove-repo address | sources   (\"apt help\" for more)", OUTPUT);
+        } else if (same(cmd, "shutdown") or same(cmd, "reboot")) {
+            print(same(cmd, "reboot") ? "Restarting..." : "Shutting down...", GOOD);
+            redraw();
+            _window.power(same(cmd, "reboot")); // (files are already on the disk: every write is flushed)
         } else if (same(cmd, "clear")) {
             _count = 0;
             _first = 0;

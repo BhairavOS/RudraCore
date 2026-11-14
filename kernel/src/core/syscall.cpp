@@ -1,6 +1,7 @@
 #include "core/syscall.h"
 
 #include "arch/x86_64/io.h"
+#include "arch/x86_64/acpi.h"
 #include "arch/x86_64/iommu.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/protect.h"
@@ -163,7 +164,8 @@ bool isHardware(Object const* object) {
     switch (object->type) {
     case ObjectType::Irq:
     case ObjectType::IoPorts:
-    case ObjectType::PciDevice: return true;
+    case ObjectType::PciDevice:
+    case ObjectType::Firmware: return true;
     case ObjectType::Memory: return not static_cast<Core::SharedMemory const*>(object)->owned;
     case ObjectType::Channel: return false;
     }
@@ -343,6 +345,8 @@ Arch::Frame* sysSystemInfo(Call const& c, Boot::Info const& boot) {
     info.timeOfDay = Time::timeOfDay();
     info.unixTime = Time::unixTime();
     info.bootMode = boot.mode;
+    if (c.task->privilege != Core::Privilege::App)
+        info.acpiRsdp = boot.acpiRsdp;
     if (boot.hasFramebuffer) {
         auto const& fb = boot.framebuffer;
         info.screenWidth = fb.width;
@@ -475,6 +479,7 @@ Arch::Frame* sysHandleRevoke(Call const& c) {
         break;
     case ObjectType::IoPorts:
     case ObjectType::PciDevice:
+    case ObjectType::Firmware:
         break;
     }
     return c.result(Abi::OK);
@@ -897,6 +902,106 @@ Arch::Frame* sysDeviceBar(Call const& c) {
     return c.result(static_cast<i64>(handle));
 }
 
+// Port I/O of 1, 2 or 4 bytes (ACPI registers are often 16 or 32 bits wide).
+Arch::Frame* sysPortWide(Call const& c, bool write) {
+    i64 error = 0;
+    auto* ports = c.lookup<Core::IoPorts>(c.arg0(), ObjectType::IoPorts, write ? Abi::RIGHT_WRITE : Abi::RIGHT_READ,
+                                          error);
+    if (not ports)
+        return c.result(error);
+    u64 port = c.arg1(), width = c.arg2();
+    if (port > 0xFFFF or (width != 1 and width != 2 and width != 4) or port + width - 1 > 0xFFFF)
+        return c.result(Abi::INVALID_ARGUMENT);
+    for (u64 p = port; p < port + width; p++) {
+        if (not ports->contains(static_cast<u16>(p)))
+            return c.result(Abi::INVALID_ARGUMENT);
+    }
+    auto at = static_cast<u16>(port);
+    if (not write) {
+        if (width == 1)
+            return c.result(Arch::inb(at));
+        if (width == 2)
+            return c.result(Arch::inw(at));
+        u32 value;
+        asm volatile("inl %1, %0" : "=a"(value) : "Nd"(at));
+        return c.result(value);
+    }
+    u64 value = c.arg3();
+    if (width == 1)
+        Arch::outb(at, static_cast<u8>(value));
+    else if (width == 2)
+        Arch::outw(at, static_cast<u16>(value));
+    else
+        asm volatile("outl %0, %1" : : "a"(static_cast<u32>(value)), "Nd"(at));
+    return c.result(Abi::OK);
+}
+
+// Physical memory for firmware code: never RAM the kernel hands out, the
+// kernel and its modules, the loader's memory or the screen.
+Arch::Frame* sysFirmwareMemory(Call const& c, Boot::Info const& boot) {
+    i64 error = 0;
+    if (not c.lookup<Core::Firmware>(c.arg0(), ObjectType::Firmware, Abi::RIGHT_READ, error))
+        return c.result(error);
+    u64 physical = c.arg1(), size = c.arg2();
+    if (size == 0 or size > Core::SharedMemory::MAX_SIZE or physical + size < physical or physical + size > (1ull << 52))
+        return c.result(Abi::INVALID_ARGUMENT);
+    u64 start = Mem::alignDown(physical, Mem::PAGE_SIZE), end = Mem::alignUp(physical + size, Mem::PAGE_SIZE);
+    bool tables = false;
+    for (usize i = 0; i < boot.regionCount; i++) {
+        auto const& r = boot.regions[i];
+        if (r.base >= end or r.base + r.length <= start)
+            continue;
+        if (r.type == Boot::RegionType::AcpiReclaimable or r.type == Boot::RegionType::AcpiNvs)
+            tables = true;
+        else if (r.type != Boot::RegionType::Reserved and r.type != Boot::RegionType::ReservedMapped)
+            return c.result(Abi::ACCESS_DENIED); // RAM, kernel, loader or screen memory
+    }
+    auto* memory = Core::SharedMemory::device(start, end - start,
+                                              tables ? Vmm::Cache::WriteBack : Vmm::Cache::Uncached);
+    u64 handle = c.task->addHandle({memory, Abi::RIGHT_READ | Abi::RIGHT_WRITE, 0});
+    if (not handle) {
+        memory->unref();
+        return c.result(Abi::NO_SPACE);
+    }
+    return c.result(static_cast<i64>(handle));
+}
+
+// PCI configuration space for firmware code (segment 0).
+Arch::Frame* sysFirmwarePci(Call const& c) {
+    bool write = c.arg2() & Abi::PCI_WRITE;
+    i64 error = 0;
+    if (not c.lookup<Core::Firmware>(c.arg0(), ObjectType::Firmware, write ? Abi::RIGHT_WRITE : Abi::RIGHT_READ, error))
+        return c.result(error);
+    u64 address = c.arg1(), width = c.arg2() & 0xFF;
+    u8 offset = static_cast<u8>(address);
+    if (address >> 24 or (width != 1 and width != 2 and width != 4) or offset % width)
+        return c.result(Abi::INVALID_ARGUMENT);
+    Arch::Pci::Address a{static_cast<u8>(address >> 16), static_cast<u8>((address >> 11) & 31),
+                         static_cast<u8>((address >> 8) & 7)};
+    u8 aligned = offset & 0xFC;
+    u32 dword = Arch::Pci::read32(a, aligned);
+    u32 shift = 8 * (offset & 3), mask = width == 4 ? ~0u : ((1u << (8 * width)) - 1) << shift;
+    if (not write)
+        return c.result((dword & mask) >> shift);
+    // shortcut: 1- and 2-byte writes are read-modify-write of the dword, which a
+    // write-1-to-clear register beside them would feel; AML rarely does that.
+    dword = (dword & ~mask) | ((static_cast<u32>(c.arg3()) << shift) & mask);
+    Arch::Pci::write32(a, aligned, dword);
+    return c.result(Abi::OK);
+}
+
+// Turns the machine off or restarts it (ACPI). Not for apps.
+Arch::Frame* sysPower(Call const& c) {
+    if (c.task->privilege == Core::Privilege::App)
+        return c.result(Abi::ACCESS_DENIED);
+    if (c.arg0() == Abi::POWER_RESTART)
+        Arch::Acpi::reboot();
+    if (c.arg0() != Abi::POWER_OFF)
+        return c.result(Abi::INVALID_ARGUMENT);
+    Arch::Acpi::powerOff();
+    return c.result(Abi::IO_ERROR); // (still running: it couldn't)
+}
+
 Arch::Frame* sysDmaAddress(Call const& c) {
     i64 error = 0;
     auto* device = c.lookup<Core::PciDevice>(c.arg0(), ObjectType::PciDevice, Abi::RIGHT_DMA, error);
@@ -971,6 +1076,11 @@ Arch::Frame* dispatch(Arch::Frame* frame) {
     case Abi::SYS_DEVICE_INFO: return sysDeviceInfo(c);
     case Abi::SYS_DEVICE_BAR: return sysDeviceBar(c);
     case Abi::SYS_DMA_ADDRESS: return sysDmaAddress(c);
+    case Abi::SYS_POWER: return sysPower(c);
+    case Abi::SYS_FIRMWARE_MEMORY: return sysFirmwareMemory(c, *bootInfo);
+    case Abi::SYS_FIRMWARE_PCI: return sysFirmwarePci(c);
+    case Abi::SYS_PORT_IN_WIDE: return sysPortWide(c, false);
+    case Abi::SYS_PORT_OUT_WIDE: return sysPortWide(c, true);
 
     default: return c.result(Abi::UNKNOWN_SYSCALL);
     }

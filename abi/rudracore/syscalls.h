@@ -98,7 +98,29 @@ enum Syscall : unsigned long {
                           //   (from SYS_MEMORY_CREATE: physically contiguous), so the device can
                           //   read and write it. Keep the memory handle open while the device
                           //   uses it.
+    SYS_POWER = 38,       // (u64 action: POWER_OFF or POWER_RESTART): through ACPI. Root and
+                          //   System programs only (KamalShell), not apps: ACCESS_DENIED.
+                          //   Returns (IO_ERROR) only if the machine couldn't be turned off.
+    // For the acpi server (firmware access; init hands it INIT_HANDLE_FIRMWARE
+    // and INIT_HANDLE_FIRMWARE_PORTS):
+    //   SYS_FIRMWARE_MEMORY = 39: (Handle firmware, u64 physical, u64 size) -> Handle to
+    //       memory to map: physical memory that isn't RAM, kernel, loader or
+    //       screen memory (ACPI tables, chipset registers). Uncached except ACPI
+    //       table memory. Needs RIGHT_READ.
+    //   SYS_FIRMWARE_PCI = 40: (Handle firmware, u64 address, u64 widthAndWrite, u64 value)
+    //       -> the value read (or OK). address = bus << 16 | device << 11 |
+    //       function << 8 | offset (segment 0, offset < 256); widthAndWrite =
+    //       width (1, 2, 4) | 0x100 to write. Reads need RIGHT_READ, writes RIGHT_WRITE.
+    //   SYS_PORT_IN_WIDE = 41: (Handle ports, u16 port, u64 width 1/2/4) -> value
+    //   SYS_PORT_OUT_WIDE = 42: (Handle ports, u16 port, u64 width, u64 value)
+    SYS_FIRMWARE_MEMORY = 39,
+    SYS_FIRMWARE_PCI = 40,
+    SYS_PORT_IN_WIDE = 41,
+    SYS_PORT_OUT_WIDE = 42,
 };
+
+constexpr unsigned long POWER_OFF = 1, POWER_RESTART = 2;
+constexpr unsigned long PCI_WRITE = 0x100;
 
 // A PCI device's identity (SYS_DEVICE_INFO).
 struct DeviceInfo {
@@ -182,6 +204,8 @@ enum InitHandle : Handle {
     INIT_HANDLE_STORAGE = 5,     // PCI device: the AHCI (SATA) disk controller
     INIT_HANDLE_NETWORK = 6,     // PCI device: the network card (Intel e1000 family)
     INIT_HANDLE_NETWORK_IRQ = 7, // its interrupt line
+    INIT_HANDLE_FIRMWARE = 8,       // ACPI: non-RAM physical memory and PCI configuration
+    INIT_HANDLE_FIRMWARE_PORTS = 9, // ACPI: I/O ports, except those the kernel and drivers own
 };
 
 struct SystemInfo {
@@ -200,6 +224,7 @@ struct SystemInfo {
     unsigned long unixTime;  // seconds since 1970-01-01 (UTC)
 
     unsigned long bootMode; // BOOT_NORMAL, BOOT_SAFE or BOOT_RECOVERY: the boot entry chosen
+    unsigned long acpiRsdp; // physical address of the ACPI RSDP (system programs only; apps get 0)
 };
 
 // SystemInfo.bootMode. Safe: the known-good minimum (no network, no
