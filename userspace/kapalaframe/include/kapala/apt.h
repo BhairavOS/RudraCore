@@ -18,6 +18,14 @@
 //   author = Bhairav OS examples
 //   description = An analog clock.
 //   file = clock.bpk
+//   sha256 = <the package's SHA-256, 64 hex digits>
+//
+// The index starts with a block "serial = N" (when it was made) and is
+// signed: <repository>/Packages.sig is its Ed25519 signature by a key in
+// trust.bin. `apt update` refuses an unsigned index, a wrong signature, and
+// a serial lower than one it already read from that repository (an old
+// index replayed to hide updates); apt install refuses a package whose
+// SHA-256 or version isn't what the signed index says.
 //
 // `apt update` downloads every index into /var/apt/lists/; everything else
 // reads those copies, so only update and install need the network.
@@ -29,6 +37,7 @@ namespace Kapala::Apt {
 
 constexpr char const* SOURCES = "/etc/apt/sources.txt";
 constexpr char const* LISTS = "/var/apt/lists";
+constexpr char const* SERIALS = "/var/apt/serials"; // the highest index serial read, per repository
 constexpr char const* BUILTIN = "builtin";
 constexpr unsigned long MAX_SOURCE = 160;
 
@@ -37,6 +46,7 @@ struct Available {
     AppInfo info;
     char source[MAX_SOURCE]; // BUILTIN, or the repository's address
     char file[64];           // its .bpk in that repository
+    char sha256[65];         // its SHA-256 in hex, from the signed index ("" for BUILTIN)
 };
 
 // The repositories (BUILTIN first). Returns how many.

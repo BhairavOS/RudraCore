@@ -294,25 +294,37 @@ private:
         damage(_screen.bounds());
     }
 
-    // Starts an installed app: its program is read from the disk into
-    // shared memory, and the kernel loads it from there.
+    // Starts an installed app: its signed package is read from the disk and
+    // checked again (it may have been changed since it was installed), its
+    // program copied into shared memory, and the kernel loads it from there.
     long startInstalled(char const* id, Sys::Handle const* give, unsigned long count) {
         if (not _filesOk)
             return Sys::NOT_FOUND;
-        Text<96> path;
-        path.add("/apps/").add(id).add("/app.elf");
-        FileInfo info{};
-        if (_files.stat(path.cstr(), info) < 0 or info.directory or info.size == 0 or info.size > MAX_APP_SIZE)
-            return Sys::NOT_FOUND;
-        long memory = Sys::memoryCreate(info.size);
-        if (memory < 0)
+        Package package;
+        unsigned long length = 0;
+        char const* why = "";
+        unsigned char* data = loadInstalled(_files, id, package, length, why);
+        if (not data) {
+            Text<200> t;
+            t.add("refused to start ").add(id).add(": ").add(why).add(" (\"apt verify\" checks every app)");
+            Sys::log(t.cstr());
+            return Sys::ACCESS_DENIED;
+        }
+        unsigned long size = 0;
+        unsigned char const* elf = package.file("app.elf", size);
+        long memory = Sys::memoryCreate(size);
+        if (memory < 0) {
+            delete[] data;
             return memory;
-        void* bytes = Sys::memoryMap(static_cast<Sys::Handle>(memory));
+        }
+        auto* bytes = static_cast<unsigned char*>(Sys::memoryMap(static_cast<Sys::Handle>(memory)));
         long result = Sys::OUT_OF_MEMORY;
-        if (bytes and _files.read(path.cstr(), bytes, info.size) == static_cast<long>(info.size)) {
+        if (bytes) {
+            for (unsigned long i = 0; i < size; i++)
+                bytes[i] = elf[i];
             Sys::SpawnImage request{};
             request.memory = static_cast<Sys::Handle>(memory);
-            request.size = info.size;
+            request.size = size;
             copyString(request.name, sizeof(request.name), id);
             for (unsigned long i = 0; i < count; i++)
                 request.handles[i] = give[i];
@@ -322,6 +334,7 @@ private:
         if (bytes)
             Sys::memoryUnmap(bytes);
         Sys::close(static_cast<Sys::Handle>(memory));
+        delete[] data;
         return result;
     }
 

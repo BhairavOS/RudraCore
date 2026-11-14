@@ -124,6 +124,7 @@ Config readConfig(Efi::File* root) {
         print("  no /boot/shool.cfg, using defaults\n");
         return config;
     }
+    verifyFile(CONFIG_PATH, file);
 
     char const* p = reinterpret_cast<char const*>(file.data);
     char const* end = p + file.size;

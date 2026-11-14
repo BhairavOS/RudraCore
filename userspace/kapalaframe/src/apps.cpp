@@ -227,18 +227,48 @@ bool verifyPackage(u8 const* data, u64 len, char const*& error) {
         error = "the package isn't signed";
         return false;
     }
-    static auto const* trust = static_cast<u8 const*>(Sys::openFile("trust"));
-    if (not trust or memcmp(trust, "BTK1", 4) != 0) {
-        error = "this system has no trusted publisher keys (trust.bin)";
-        return false;
-    }
-    unsigned keys = read32(trust + 4);
-    for (unsigned k = 0; k < keys and k < 16; k++) {
-        if (Crypto::ed25519Verify(data + last + 36, data, last, trust + 8 + 32 * k))
-            return true;
-    }
+    if (trustedSignature(data + last + 36, data, last))
+        return true;
     error = "the package isn't signed by a trusted publisher (or was changed)";
     return false;
+}
+
+bool trustedSignature(u8 const* signature, void const* data, u64 len) {
+    static auto const* trust = static_cast<u8 const*>(Sys::openFile("trust"));
+    if (not trust or memcmp(trust, "BTK1", 4) != 0)
+        return false; // no trusted keys: nothing is trusted
+    unsigned keys = read32(trust + 4);
+    for (unsigned k = 0; k < keys and k < 16; k++) {
+        if (Crypto::ed25519Verify(signature, data, len, trust + 8 + 32 * k))
+            return true;
+    }
+    return false;
+}
+
+u8* loadInstalled(Files& files, char const* id, Package& package, u64& len, char const*& error) {
+    if (not validId(id)) {
+        error = "no such app";
+        return nullptr;
+    }
+    Text<96> path;
+    appPath(id, "package.bpk", path);
+    u8* data = readWholeFile(files, path.cstr(), len);
+    if (not data) {
+        error = "its package is missing (installed before packages were kept, or deleted)";
+        return nullptr;
+    }
+    AppInfo installed{};
+    if (not verifyPackage(data, len, error) or not package.parse(data, len, error)) {
+        // (error says why)
+    } else if (not same(package.info().id, id)) {
+        error = "its package is another app's";
+    } else if (readAppInfo(files, id, installed) != Sys::OK or not same(installed.version, package.info().version)) {
+        error = "its manifest doesn't match its package";
+    } else {
+        return data;
+    }
+    delete[] data;
+    return nullptr;
 }
 
 long installPackage(Files& files, u8 const* data, u64 len, AppInfo& out, char const*& error) {
@@ -270,7 +300,17 @@ long installPackage(Files& files, u8 const* data, u64 len, AppInfo& out, char co
         error = "couldn't make the app's folder";
         return r;
     }
-    static constexpr char const* FILES[] = {"manifest.txt", "app.elf", "icon.png"};
+    // The signed package first: it's what runs. If a write below fails, the
+    // manifest no longer matches it and the app refuses to start.
+    appPath(out.id, "package.bpk", path);
+    r = files.write(path.cstr(), data, len);
+    if (r < 0) {
+        error = "couldn't write to the disk (is it full?)";
+        return r;
+    }
+    appPath(out.id, "app.elf", path);
+    files.remove(path.cstr()); // (older installs ran this, unchecked)
+    static constexpr char const* FILES[] = {"manifest.txt", "icon.png"};
     for (char const* name : FILES) {
         u64 size = 0;
         u8 const* content = package.file(name, size);
@@ -404,7 +444,7 @@ long uninstallApp(Files& files, char const* id) {
     if (not validId(id))
         return Sys::INVALID_ARGUMENT;
     Text<96> path;
-    static constexpr char const* FILES[] = {"manifest.txt", "app.elf", "icon.png"};
+    static constexpr char const* FILES[] = {"manifest.txt", "package.bpk", "app.elf", "icon.png"};
     for (char const* name : FILES) {
         appPath(id, name, path);
         files.remove(path.cstr());

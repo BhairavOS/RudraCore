@@ -66,14 +66,15 @@ programObjs = $(patsubst %,$(BUILD)/%.o,$(shell find userspace/programs/$(1) -na
 # built for the Windows x86_64 target (UEFI uses its calling convention and
 # file format) and linked with lld-link.
 SHOOL_SRCS := $(wildcard shoolloader/src/*.cpp)
-SHOOL_OBJS := $(SHOOL_SRCS:%.cpp=$(BUILD)/%.obj)
+# Verified boot uses Kapalaframe's SHA-256 and Ed25519 (shoolloader/src/verify.cpp).
+SHOOL_OBJS := $(SHOOL_SRCS:%.cpp=$(BUILD)/%.obj) $(BUILD)/shoolloader/crypto.obj
 SHOOL_EFI := $(BUILD)/shoolloader.efi
 SHOOL_CXXFLAGS := \
 	--target=x86_64-unknown-windows -std=c++23 -O2 \
 	-Wall -Wextra -Werror \
 	-ffreestanding -fshort-wchar -fno-exceptions -fno-rtti -fno-stack-protector \
 	-mno-red-zone -mno-stack-arg-probe -mno-80387 -mno-mmx -mno-sse -mno-sse2 \
-	-Iabi -MMD -MP
+	-Iabi -Iuserspace/kapalaframe/include -I$(BUILD) -MMD -MP
 
 # What goes on the boot media: stripped copies (the unstripped ELFs in
 # build/ keep their debug info for backtraces).
@@ -89,6 +90,20 @@ BPK := $(BUILD)/tools/bpk
 
 STRIPPED := $(BOOT_FILES)/rudracore.elf $(USER_PROGRAMS:%=$(BOOT_FILES)/%.elf) $(BOOT_FILES)/fonts.bin \
 	$(BOOT_FILES)/catalog.bin $(BOOT_FILES)/trust.bin $(BOOT_FILES)/roots.bin
+
+# Verified boot. ShoolLoader boots only files listed in shool.sum (their
+# SHA-256) when shool.sig is that list's Ed25519 signature by BOOT_KEY,
+# whose public half is built into the loader. BOOT_VERSION is the boot
+# image's security version: raise it when a release fixes a security hole,
+# and machines that booted it refuse older images from then on.
+BOOT_KEY ?= keys/boot-signing.pem
+BOOT_VERSION ?= 1
+SIGNED_BOOT := $(BOOT_FILES)/shool.cfg $(BOOT_FILES)/shool.sum $(BOOT_FILES)/shool.sig
+
+# More package/repository keys to trust besides SIGNING_KEY's: public keys
+# (PEM) in keys/trusted/. Put the old key's public half there when rotating
+# to a new SIGNING_KEY; delete it to revoke a key. At most 15.
+TRUSTED_KEYS := $(wildcard keys/trusted/*.pem)
 
 # The certificate authorities HTTPS trusts: the build machine's bundle
 # (Mozilla's list, from the ca-certificates package), as roots.bin.
@@ -187,6 +202,21 @@ $(BUILD)/shoolloader/%.obj: shoolloader/%.cpp
 	@mkdir -p $(@D)
 	$(CXX) $(SHOOL_CXXFLAGS) -c $< -o $@
 
+$(BUILD)/shoolloader/crypto.obj: userspace/kapalaframe/src/crypto.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(SHOOL_CXXFLAGS) -c $< -o $@
+
+# The boot key's public half, built into the loader.
+$(BUILD)/shoolloader/src/verify.obj: $(BUILD)/boot-key.h
+
+$(BUILD)/boot-key.h: $(BOOT_KEY)
+	@mkdir -p $(@D)
+	{ echo '// Made by the Makefile from $(BOOT_KEY): boot files must be signed by it.'; \
+	  echo 'constexpr uint8_t BOOT_KEY[32] = {'; \
+	  openssl pkey -in $< -pubout -outform DER | tail -c 32 | od -An -v -tx1 | sed 's/ \([0-9a-f][0-9a-f]\)/0x\1,/g'; \
+	  echo '};'; } > $@.tmp
+	mv $@.tmp $@
+
 $(SHOOL_EFI): $(SHOOL_OBJS)
 	lld-link /nologo /subsystem:efi_application /entry:efiMain /nodefaultlib /out:$@ $^
 
@@ -211,8 +241,13 @@ $(BPK): tools/bpk.cpp
 
 $(SIGNING_KEY):
 	@mkdir -p $(@D)
-	openssl genpkey -algorithm ed25519 -out $@
+	(umask 077 && openssl genpkey -algorithm ed25519 -out $@)
 	@echo "made a new package signing key: $@ (keep it private, don't lose it)"
+
+$(BOOT_KEY):
+	@mkdir -p $(@D)
+	(umask 077 && openssl genpkey -algorithm ed25519 -out $@)
+	@echo "made a new boot signing key: $@ (keep it private; only boot images it signs will boot)"
 
 $(BUILD)/packages/%.bpk: $(BUILD)/app-elf/%.elf apps/%/manifest.txt $(BPK) $(SIGNING_KEY)
 	@mkdir -p $(@D)
@@ -231,12 +266,42 @@ $(BOOT_FILES)/roots.bin: $(CA_BUNDLE) $(BPK)
 	for f in $(BUILD)/roots/*.pem; do openssl x509 -in $$f -outform DER -out $${f%.pem}.der; done
 	$(BPK) catalog $@ $(BUILD)/roots/*.der 2>/dev/null
 
-# The keys Bhairav OS trusts for packages: "BTK1", a 32-bit count, then
-# each 32-byte Ed25519 public key (the last 32 bytes of its DER form).
-$(BOOT_FILES)/trust.bin: $(SIGNING_KEY)
+# The keys Bhairav OS trusts for packages and repository indexes: "BTK1", a
+# 32-bit count, then each 32-byte Ed25519 public key (the last 32 bytes of
+# its DER form). SIGNING_KEY's first, then TRUSTED_KEYS. It's a boot file,
+# so verified boot protects it.
+$(BOOT_FILES)/trust.bin: $(SIGNING_KEY) $(TRUSTED_KEYS)
 	@mkdir -p $(@D)
-	printf 'BTK1\001\000\000\000' > $@
-	openssl pkey -in $< -pubout -outform DER | tail -c 32 >> $@
+	@test $(words x $(TRUSTED_KEYS)) -le 16 || (echo "trust.bin holds at most 16 keys" && exit 1)
+	printf "BTK1\\$$(printf %03o $(words x $(TRUSTED_KEYS)))\\000\\000\\000" > $@
+	openssl pkey -in $(SIGNING_KEY) -pubout -outform DER | tail -c 32 >> $@
+	for k in $(TRUSTED_KEYS); do openssl pkey -pubin -in $$k -outform DER | tail -c 32 >> $@ || exit 1; done
+
+# The signed list of boot files (see BOOT_KEY above). Remade every time but
+# only replaced when it changes, so BOOT_VERSION changes are picked up.
+$(BOOT_FILES)/shool.cfg: boot/shool.cfg
+	@mkdir -p $(@D)
+	cp $< $@
+
+$(BOOT_FILES)/shool.sum: $(STRIPPED) $(BOOT_FILES)/shool.cfg FORCE
+	@{ echo "version $(BOOT_VERSION)"; cd $(BOOT_FILES) && sha256sum $(notdir $(STRIPPED)) shool.cfg; } > $@.tmp
+	@cmp -s $@.tmp $@ || mv $@.tmp $@
+	@rm -f $@.tmp
+
+$(BOOT_FILES)/shool.sig: $(BOOT_FILES)/shool.sum $(BOOT_KEY)
+	openssl pkeyutl -sign -rawin -inkey $(BOOT_KEY) -in $< -out $@
+
+# Limine (the BIOS path) checks a BLAKE2B hash after every path, and its
+# own copy holds the config's hash (enroll-config below), so a changed file
+# or config stops the boot. That's integrity, not a signature: whoever can
+# rewrite the whole medium can rewrite limine-bios.sys too.
+$(BUILD)/limine.conf: boot/limine.conf $(STRIPPED)
+	cp $< $@.tmp
+	for f in $(notdir $(STRIPPED)); do \
+		sed -i "s|boot():/boot/$$f\$$|&#$$(b2sum $(BOOT_FILES)/$$f | cut -d' ' -f1)|" $@.tmp || exit 1; \
+	done
+	@if grep -q 'boot():/boot/[^#]*$$' $@.tmp; then echo "limine.conf: a boot file without a hash" && exit 1; fi
+	mv $@.tmp $@
 
 packages: $(PACKAGES)
 
@@ -252,15 +317,20 @@ SERVE := $(BUILD)/tools/serve
 
 repo: $(REPO)/Packages
 
-$(REPO)/Packages: $(PACKAGES)
+# The index starts with a serial (the time it was made: apt refuses one
+# older than it has already read), gives each package's SHA-256, and is
+# signed: Packages.sig, by SIGNING_KEY.
+$(REPO)/Packages: $(PACKAGES) $(SIGNING_KEY)
 	@mkdir -p $(REPO)
 	cp $(PACKAGES) $(REPO)/
-	@rm -f $@.tmp
+	@printf 'serial = %s\n\n' "$$(date +%s)" > $@.tmp
 	@for app in $(SDK_APPS); do \
 		sed -e 's/\r$$//' apps/$$app/manifest.txt >> $@.tmp; \
 		echo "file = $$app.bpk" >> $@.tmp; \
+		echo "sha256 = $$(sha256sum $(REPO)/$$app.bpk | cut -d' ' -f1)" >> $@.tmp; \
 		echo >> $@.tmp; \
 	done
+	openssl pkeyutl -sign -rawin -inkey $(SIGNING_KEY) -in $@.tmp -out $@.sig
 	mv $@.tmp $@
 
 $(SERVE): tools/serve.cpp
@@ -284,13 +354,13 @@ $(BOOT_FILES)/%.elf: $(BUILD)/user/%.elf
 	@mkdir -p $(@D)
 	llvm-strip -o $@ $<
 
-$(EFI_IMG): $(SHOOL_EFI) $(STRIPPED) boot/shool.cfg
+$(EFI_IMG): $(SHOOL_EFI) $(STRIPPED) $(SIGNED_BOOT)
 	rm -f $@
 	dd if=/dev/zero of=$@ bs=1M count=16 status=none
 	mformat -i $@ -T 32768 -h 64 -s 32 -v BHAIRAV ::
 	mmd -i $@ ::/EFI ::/EFI/BOOT ::/boot
 	mcopy -i $@ $(SHOOL_EFI) ::/EFI/BOOT/BOOTX64.EFI
-	mcopy -i $@ $(STRIPPED) boot/shool.cfg ::/boot/
+	mcopy -i $@ $(STRIPPED) $(SIGNED_BOOT) ::/boot/
 
 # A blank FAT32 volume (no partition table) with a welcome file.
 $(DISK): assets/welcome.txt
@@ -303,12 +373,14 @@ $(DISK): assets/welcome.txt
 # One ISO for both firmware types:
 #   UEFI -> ShoolLoader🔱 (from the FAT boot image)
 #   BIOS -> Limine (ShoolLoader is UEFI-only), reading the ISO's /boot
-$(ISO): $(EFI_IMG) $(STRIPPED) boot/limine.conf
+$(ISO): $(EFI_IMG) $(STRIPPED) $(BUILD)/limine.conf
 	rm -rf $(ISOROOT)
 	mkdir -p $(ISOROOT)/boot/limine
 	cp $(STRIPPED) $(EFI_IMG) $(ISOROOT)/boot/
-	cp boot/limine.conf $(ISOROOT)/boot/limine/
+	cp $(BUILD)/limine.conf $(ISOROOT)/boot/limine/
 	cp $(LIMINE_DIR)/limine-bios.sys $(LIMINE_DIR)/limine-bios-cd.bin $(ISOROOT)/boot/limine/
+	$(LIMINE_DIR)/limine enroll-config --quiet $(ISOROOT)/boot/limine/limine-bios.sys \
+		$$(b2sum $(BUILD)/limine.conf | cut -d' ' -f1)
 	xorriso -as mkisofs -R -r -J -quiet \
 		-b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table \
 		-hfsplus -apm-block-size 2048 \

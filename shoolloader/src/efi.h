@@ -169,6 +169,27 @@ struct BootServices {
     void* createEventEx;
 };
 
+// MARK: Runtime services (only variables are used)
+
+constexpr uint32_t VARIABLE_NON_VOLATILE = 1;
+constexpr uint32_t VARIABLE_BOOTSERVICE_ACCESS = 2;
+constexpr uint32_t VARIABLE_RUNTIME_ACCESS = 4;
+
+struct RuntimeServices {
+    TableHeader header;
+
+    void* getTime;
+    void* setTime;
+    void* getWakeupTime;
+    void* setWakeupTime;
+    void* setVirtualAddressMap;
+    void* convertPointer;
+    Status (*getVariable)(Char16 const* name, Guid const* vendor, uint32_t* attributes, uint64_t* dataSize, void* data);
+    void* getNextVariableName;
+    Status (*setVariable)(Char16 const* name, Guid const* vendor, uint32_t attributes, uint64_t dataSize,
+                          void const* data);
+};
+
 // MARK: System table
 
 struct ConfigurationTable {
@@ -186,7 +207,7 @@ struct SystemTable {
     SimpleTextOutput* conOut;
     Handle standardErrorHandle;
     SimpleTextOutput* stdErr;
-    void* runtimeServices;
+    RuntimeServices* runtimeServices;
     BootServices* bootServices;
     uint64_t numberOfTableEntries;
     ConfigurationTable* configurationTable;

@@ -1,8 +1,8 @@
 #include <kapala/crypto.h>
 
 extern "C" {
-void* memcpy(void* dest, void const* src, unsigned long n);
-void* memset(void* dest, int value, unsigned long n);
+void* memcpy(void* dest, void const* src, decltype(sizeof(0)) n);
+void* memset(void* dest, int value, decltype(sizeof(0)) n);
 }
 
 namespace Kapala::Crypto {

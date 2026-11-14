@@ -17,7 +17,7 @@ namespace Kapala::Crypto {
 
 using u8 = unsigned char;
 using u32 = unsigned;
-using u64 = unsigned long;
+using u64 = decltype(sizeof(0)); // 64 bits also in ShoolLoader, a Windows-target build where long is 32
 
 // MARK: Hashing
 

@@ -1,4 +1,5 @@
 #include <kapala/apt.h>
+#include <kapala/crypto.h>
 #include <kapala/http.h>
 #include <kapala/text.h>
 
@@ -101,6 +102,51 @@ void readBlocks(char const* text, u64 len, Take take, Block block) {
 }
 
 bool keyIs(char const* key, u64 n, char const* name) { return n == length(name) and memcmp(key, name, n) == 0; }
+
+u64 number(char const* s, u64 n) {
+    u64 v = 0;
+    for (u64 i = 0; i < n and s[i] >= '0' and s[i] <= '9' and v < 1'000'000'000'000'000'000ul; i++)
+        v = v * 10 + static_cast<u64>(s[i] - '0');
+    return v;
+}
+
+void toHex(u8 const digest[32], char out[65]) {
+    static constexpr char DIGITS[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        out[2 * i] = DIGITS[digest[i] >> 4];
+        out[2 * i + 1] = DIGITS[digest[i] & 15];
+    }
+    out[64] = '\0';
+}
+
+// Where a repository's highest index serial is kept: SERIALS/<16 hex digits
+// of its address's SHA-256> (any address fits a file name that way).
+void serialPath(char const* address, Text<96>& out) {
+    u8 digest[32];
+    Crypto::Sha256::hash(address, length(address), digest);
+    char hex[65];
+    toHex(digest, hex);
+    hex[16] = '\0';
+    out = {};
+    out.add(SERIALS).add("/").add(hex);
+}
+
+u64 readSerial(Files& files, char const* address) {
+    Text<96> path;
+    serialPath(address, path);
+    char text[24];
+    long n = files.read(path.cstr(), text, sizeof(text));
+    return n > 0 ? number(text, static_cast<u64>(n)) : 0;
+}
+
+long writeSerial(Files& files, char const* address, u64 serial) {
+    files.makeDir(SERIALS);
+    Text<96> path;
+    serialPath(address, path);
+    Text<24> text;
+    text.add(serial);
+    return files.write(path.cstr(), text.cstr(), text.length);
+}
 
 } // namespace
 
@@ -212,10 +258,39 @@ long update(Files& files, Net& net, UpdateReport& report) {
             report.source(list[i], -1, why);
             continue;
         }
-        // Keep it with the address it came from on the first line.
+        // It must be signed by a trusted key, and not older than the last one.
+        address.add(".sig");
+        u8* signature = nullptr;
+        u64 signatureSize = 0;
+        bool signedOk = httpGet(net, address.cstr(), signature, signatureSize, why, 1024) >= 0 and
+                        signatureSize == 64 and trustedSignature(signature, data, size);
+        delete[] signature;
         long n = 0;
-        readBlocks(reinterpret_cast<char const*>(data), size, [](char const*, u64, char const*, u64) {},
-                   [&] { n++; });
+        u64 serial = 0;
+        readBlocks(
+            reinterpret_cast<char const*>(data), size,
+            [&](char const* key, u64 kn, char const* value, u64 vn) {
+                if (keyIs(key, kn, "serial"))
+                    serial = number(value, vn);
+                else if (keyIs(key, kn, "id"))
+                    n++;
+            },
+            [] {});
+        char const* refused = nullptr;
+        if (not signedOk)
+            refused = "its index isn't signed by a trusted publisher (Packages.sig missing or wrong)";
+        else if (serial == 0)
+            refused = "its index has no serial";
+        else if (serial < readSerial(files, list[i]))
+            refused = "its index is older than one already read (an old copy replayed?)";
+        else if (writeSerial(files, list[i], serial) < 0)
+            refused = "couldn't save its index serial";
+        if (refused) {
+            delete[] data;
+            report.source(list[i], -1, refused);
+            continue;
+        }
+        // Keep it with the address it came from on the first line.
         Text<MAX_SOURCE + 16> header;
         header.add("source = ").add(list[i]).add("\n\n");
         Text<96> path;
@@ -269,6 +344,8 @@ long available(Files& files, Available* out, long capacity) {
                     copy(current.info.description, value, vn, sizeof(current.info.description));
                 else if (keyIs(key, kn, "file"))
                     copy(current.file, value, vn, sizeof(current.file));
+                else if (keyIs(key, kn, "sha256"))
+                    copy(current.sha256, value, vn, sizeof(current.sha256));
             },
             [&] {
                 if (current.info.id[0] and current.file[0] and count < capacity) {
@@ -316,11 +393,19 @@ long install(Files& files, Net& net, Available const& package, AppInfo& installe
     long r = httpGet(net, address.cstr(), data, size, error);
     if (r < 0)
         return r;
-    // It must be the app the index promised (not something else in disguise).
+    // It must be exactly the package the signed index promised: not another
+    // app, and not another (older, signed) version of it.
+    u8 digest[32];
+    char hex[65];
+    Crypto::Sha256::hash(data, size, digest);
+    toHex(digest, hex);
     Package p;
-    if (not p.parse(data, size, error)) {
+    if (not same(hex, package.sha256)) {
+        error = "the package isn't the one the repository's signed index lists (run apt update)";
         r = Sys::INVALID_ARGUMENT;
-    } else if (not same(p.info().id, package.info.id)) {
+    } else if (not p.parse(data, size, error)) {
+        r = Sys::INVALID_ARGUMENT;
+    } else if (not same(p.info().id, package.info.id) or not same(p.info().version, package.info.version)) {
         error = "the package isn't the app the repository's index promised";
         r = Sys::INVALID_ARGUMENT;
     } else {

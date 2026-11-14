@@ -314,7 +314,7 @@ private:
             print("Network: ip  ping host [count]  host name  get http(s)://address", OUTPUT);
             print("System:  date  uptime  mem  echo text...  clear", OUTPUT);
             print("Apps:    open app  edit file  browse address  apps", OUTPUT);
-            print("Packages: apt update | search word | list | show app | install app | remove app | upgrade", OUTPUT);
+            print("Packages: apt update | search | list | show | install | remove | upgrade | verify", OUTPUT);
             print("          apt add-repo address | remove-repo address | sources   (\"apt help\" for more)", OUTPUT);
         } else if (same(cmd, "clear")) {
             _count = 0;
@@ -460,6 +460,15 @@ private:
         return true;
     }
 
+    // True if the installed app's signed package still checks out.
+    bool intact(char const* id, char const*& why) {
+        Package package;
+        unsigned long length = 0;
+        unsigned char* data = loadInstalled(_files, id, package, length, why);
+        delete[] data;
+        return data != nullptr;
+    }
+
     // The packages that have a newer version than the one installed.
     long upgradable(Apt::Available* out, long capacity) {
         static AppInfo installed[32];
@@ -590,7 +599,10 @@ private:
                     continue;
                 }
                 char version[16] = {};
-                if (installedVersion(name, version) and Apt::compareVersions(a.info.version, version) <= 0) {
+                char const* why = "";
+                // (a damaged install is reinstalled from the signed source: that's the repair)
+                if (installedVersion(name, version) and Apt::compareVersions(a.info.version, version) <= 0 and
+                    intact(name, why)) {
                     Text<160> t;
                     t.add(name).add(" is already the newest version (").add(version).add(").");
                     print(t);
@@ -636,6 +648,30 @@ private:
             Text<80> t;
             t.add(done).add(" upgraded.");
             print(t.cstr(), GOOD);
+        } else if (same(sub, "verify")) {
+            // Recovery check: every installed app's package is checked as at
+            // launch; a damaged one is repaired by installing it again.
+            static AppInfo installed[32];
+            long n = listApps(_files, installed, 32);
+            int bad = 0;
+            for (long i = 0; i < n; i++) {
+                char const* why = "";
+                Text<200> t;
+                if (intact(installed[i].id, why)) {
+                    t.add("  ok      ").add(installed[i].id).add(" ").add(installed[i].version);
+                    print(t);
+                } else {
+                    t.add("  FAILED  ").add(installed[i].id).add(": ").add(why);
+                    error(t.cstr());
+                    Text<120> fix;
+                    fix.add("          repair: apt install ").add(installed[i].id).add("  (or apt remove)");
+                    print(fix);
+                    bad++;
+                }
+            }
+            Text<120> t;
+            t.add(n).add(n == 1 ? " app checked, " : " apps checked, ").add(bad).add(" failed.");
+            print(t.cstr(), bad ? ERROR : GOOD);
         } else if (same(sub, "add-repo") or same(sub, "remove-repo")) {
             if (n < 2)
                 return error("usage: apt add-repo http://address  (a folder with a Packages file)");
@@ -665,6 +701,7 @@ private:
             print("  apt install app...         install (also: a .bpk file path or web address)");
             print("  apt remove app...          uninstall");
             print("  apt upgrade                install newer versions of installed apps");
+            print("  apt verify                 check every installed app's signed package");
             print("  apt add-repo address       add a repository (http://... folder with a Packages file)");
             print("  apt remove-repo address    and remove one");
             print("  apt sources                list the repositories");

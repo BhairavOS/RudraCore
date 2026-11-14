@@ -73,6 +73,15 @@ Config readConfig(Efi::File* root);
 // "/boot/init.elf" -> "init"
 void baseName(char* dest, uint64_t size, char const* path);
 
+// MARK: Verified boot (verify.cpp)
+
+// Reads and checks the signed list of boot files, and refuses an older boot
+// image than one that already booted. fail()s otherwise.
+void loadBootManifest(Efi::File* root);
+
+// fail()s unless the file is in the signed list with this content.
+void verifyFile(char const* path, FileData const& file);
+
 // MARK: Kernel
 
 struct Kernel {

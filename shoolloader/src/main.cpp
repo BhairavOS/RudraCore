@@ -46,12 +46,14 @@ extern "C" Efi::Status efiMain(Efi::Handle image, Efi::SystemTable* systemTable)
     print(" - Trident of System Awakening\n\n");
 
     Efi::File* root = openBootVolume();
+    loadBootManifest(root); // every file read below must be in its signed list
     Config config = readConfig(root);
 
     // The kernel.
     FileData kernelFile;
     if (not readFile(root, config.kernel, Efi::LOADER_DATA, kernelFile))
         fail("can't read the kernel (check 'kernel =' in /boot/shool.cfg)");
+    verifyFile(config.kernel, kernelFile);
     Kernel kernel = loadKernel(kernelFile);
     print("  kernel  ");
     print(config.kernel);
@@ -81,6 +83,7 @@ extern "C" Efi::Status efiMain(Efi::Handle image, Efi::SystemTable* systemTable)
             print(", skipping it\n");
             continue;
         }
+        verifyFile(config.modules[i], module);
         auto& entry = info->modules[info->moduleCount++];
         entry.physical = reinterpret_cast<uint64_t>(module.data);
         entry.size = module.size;

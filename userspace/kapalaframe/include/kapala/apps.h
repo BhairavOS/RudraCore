@@ -12,7 +12,11 @@
 //   signature      last: an Ed25519 signature (64 bytes) of every byte before
 //                  this file's entry, by a key in the boot image's trust.bin
 //
-// Installing puts those files in /apps/<id>/ on the disk; KamalShell shows
+// Installing keeps the signed package itself as /apps/<id>/package.bpk, plus
+// its manifest.txt and icon.png for display. The program is never stored
+// on its own: KamalShell checks the package's signature again at every
+// launch and runs the app.elf inside it, so an app changed on the disk
+// (offline, say) doesn't run. KamalShell shows
 // installed apps in the dock and the app grid and starts them like the
 // built-in ones (they get the same handles: shell, files, network). What
 // those connections reach depends on the app's permissions: without any,
@@ -84,9 +88,20 @@ private:
 // Reads "key = value" lines.
 bool parseManifest(char const* text, unsigned long length, AppInfo& out);
 
+// True if `signature` (64 bytes, Ed25519) signs the data with a key Bhairav
+// OS trusts: trust.bin in the boot image. Packages and repository indexes.
+bool trustedSignature(unsigned char const* signature, void const* data, unsigned long length);
+
 // True if the package is signed by a key Bhairav OS trusts (trust.bin in
 // the boot image). Sets error otherwise.
 bool verifyPackage(unsigned char const* data, unsigned long length, char const*& error);
+
+// An installed app's package, checked again: signed by a trusted key,
+// really that app's, and matching its installed manifest. Returns the bytes
+// (delete[] them; `package` points into them), or nullptr with `error` set.
+// KamalShell launches from it; `apt verify` checks every app with it.
+unsigned char* loadInstalled(Files& files, char const* id, Package& package, unsigned long& length,
+                             char const*& error);
 
 // Installs (or updates) a package on the disk: only signed ones, and an
 // update never goes back to an older version. OK, or an error with
