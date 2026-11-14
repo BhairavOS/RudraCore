@@ -3,6 +3,7 @@
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/io.h"
 #include "arch/x86_64/iommu.h"
+#include "arch/x86_64/pci.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/protect.h"
 #include "boot.h"
@@ -170,6 +171,37 @@ void faultTest() {
             (void)*reinterpret_cast<u8 volatile*>(USER_PAGE);
         }
         log("[test] FAILED: the kernel got through");
+    } else if constexpr (RUDRACORE_FAULT_TEST == 5) {
+        // What a compromised driver could do: point its device's MSI at the
+        // CPU as an NMI. The AHCI controller's next interrupt is then that
+        // message. Interrupt remapping must block it (logged, and the disk
+        // stops); without it, the NMI reaches the kernel.
+        bool armed = false;
+        Arch::Pci::forEach([&](Arch::Pci::Address a) {
+            if (armed or (Arch::Pci::read32(a, 0x08) >> 16) != 0x0106) // mass storage, SATA
+                return;
+            if (not(Arch::Pci::read16(a, 0x06) & (1 << 4))) // no capability list
+                return;
+            for (u8 at = Arch::Pci::read32(a, 0x34) & 0xFC; at; at = (Arch::Pci::read32(a, at) >> 8) & 0xFC) {
+                u32 header = Arch::Pci::read32(a, at);
+                if ((header & 0xFF) != 0x05) // MSI
+                    continue;
+                bool wide = (header >> 16) & (1 << 7); // 64-bit address
+                // Remappable format (bit 4), handle 0: what an attacker must
+                // send on real VT-d, which blocks compatibility-format messages
+                // while GSTS.CFIS is clear. (QEMU doesn't model that block: there
+                // a compatibility-format message passes, so it can't be tested.)
+                Arch::Pci::write32(a, at + 4, 0xFEE00010);
+                if (wide)
+                    Arch::Pci::write32(a, at + 8, 0);
+                Arch::Pci::write16(a, at + (wide ? 12 : 8), 0x0400); // delivery mode NMI
+                Arch::Pci::write16(a, at + 2, static_cast<u16>((header >> 16) | 1)); // MSI enable
+                armed = true;
+                return;
+            }
+        });
+        log(armed ? "[test] the SATA controller now sends its interrupts as NMI messages: interrupt remapping must block them"
+                  : "[test] FAILED: no SATA controller with MSI to test with");
     }
 }
 

@@ -8,6 +8,11 @@
 // starts with nothing; a driver that gets a buffer's address also gets that
 // buffer, and only that buffer, mapped for its device. Without VT-d
 // hardware (no ACPI DMAR table) DMA stays unconfined, and the log says so.
+//
+// Interrupt remapping, where every unit supports it: devices may not send
+// interrupt messages (MSI) at all, since every interrupt here comes through
+// the legacy PIC. That stops a device from raising arbitrary vectors, NMIs
+// or SMIs by writing to 0xFEExxxxx.
 namespace Rudracore::Arch::Iommu {
 
 // Finds the remapping units and turns translation on, all devices blocked.

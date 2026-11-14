@@ -20,8 +20,12 @@ constexpr usize MAX_UNITS = 4;
 constexpr usize MAX_DOMAINS = 32;
 
 // Registers
-constexpr u64 CAP = 0x08, ECAP = 0x10, GCMD = 0x18, GSTS = 0x1C, RTADDR = 0x20, CCMD = 0x28, FSTS = 0x34;
+constexpr u64 CAP = 0x08, ECAP = 0x10, GCMD = 0x18, GSTS = 0x1C, RTADDR = 0x20, CCMD = 0x28, FSTS = 0x34,
+              IRTA = 0xB8;
 constexpr u32 TRANSLATION_ENABLE = 1u << 31, SET_ROOT_POINTER = 1u << 30;
+constexpr u32 INTERRUPT_REMAP_ENABLE = 1u << 25, SET_INTERRUPT_TABLE = 1u << 24, COMPATIBILITY_ALLOWED = 1u << 23;
+constexpr u64 ECAP_INTERRUPT_REMAPPING = 1u << 3;
+constexpr u8 FIRST_INTERRUPT_FAULT = 0x20; // fault reasons 0x20-0x2F are interrupt requests
 constexpr u32 ONE_SHOT_MASK = 0x96FFFFFF; // GSTS bits that may be written back to GCMD
 
 // Second-level page table entries
@@ -47,6 +51,7 @@ usize domainCount = 0;
 u64 rootTable = 0; // shared by every unit
 int levels = 0;    // 3 (39-bit addresses) or 4 (48-bit)
 bool coherent = true; // the hardware snoops our table writes (else: flush them)
+bool interruptRemapping = true; // every unit can remap interrupts (cleared when one can't)
 
 u64 read64(Unit const& u, u64 off) { return *reinterpret_cast<u64 volatile*>(u.regs + off); }
 u32 read32(Unit const& u, u64 off) { return *reinterpret_cast<u32 volatile*>(u.regs + off); }
@@ -192,6 +197,7 @@ void init(Boot::Info const& info) {
             u.faultCount = ((cap >> 40) & 0xFF) + 1;
             sagaw &= static_cast<int>((cap >> 8) & 0x1F);
             coherent = coherent and (ecap & 1);
+            interruptRemapping = interruptRemapping and (ecap & ECAP_INTERRUPT_REMAPPING);
         }
         at += size;
     }
@@ -211,6 +217,34 @@ void init(Boot::Info const& info) {
         setCommand(units[i], TRANSLATION_ENABLE);
     log("[iommu] VT-d on (", unitCount, " unit(s), ", levels == 4 ? 48 : 39,
         "-bit): devices reach only memory their driver registered");
+
+    // Interrupt remapping. A device write to 0xFEExxxxx isn't DMA but an
+    // interrupt message, which DMA remapping lets through: a driver's device
+    // could raise any vector, an NMI or an SMI. Every interrupt here comes
+    // through the legacy PIC (wires, not messages), so no device needs to
+    // send one: the table is all not-present, and compatibility-format
+    // messages stay blocked (GCMD.CFI clear). Each blocked one is logged.
+    // shortcut: no entries yet; when a driver uses MSI, give its device
+    // entries with source-id checking (SVT/SID) instead of blocking all.
+    u64 interruptTable = interruptRemapping ? Pmm::allocZeroed() : 0; // 256 entries of 16 bytes
+    if (not interruptTable) {
+        log("[iommu] no interrupt remapping: a device could still send interrupt messages (MSI)");
+        return;
+    }
+    bool on = true;
+    for (usize i = 0; i < unitCount; i++) {
+        write64(units[i], IRTA, interruptTable | 7); // 2^(7+1) = 256 entries, xAPIC format
+        setCommand(units[i], SET_INTERRUPT_TABLE);
+        setCommand(units[i], INTERRUPT_REMAP_ENABLE);
+        u32 status = read32(units[i], GSTS);
+        on = on and (status & INTERRUPT_REMAP_ENABLE) and not(status & COMPATIBILITY_ALLOWED);
+    }
+    // (The interrupt entry cache needs no flush: remapping was off until
+    // now, and the table never changes.)
+    if (on)
+        log("[iommu] interrupt remapping on: devices can't send interrupt messages (all interrupts use the PIC)");
+    else
+        log("[iommu] interrupt remapping didn't turn on (or lets compatibility-format messages through)");
 }
 
 bool enabled() {
@@ -257,8 +291,13 @@ void reportFaults() {
                 continue;
             u64 address = read64(u, at) & ADDRESS;
             u16 source = static_cast<u16>(high);
-            log("[iommu] blocked a DMA ", (high >> 62) & 1 ? "read" : "write", " by device ", source >> 8, ":",
-                (source >> 3) & 31, ".", source & 7, " at ", Hex{address}, " (reason ", (high >> 32) & 0xFF, ")");
+            u8 reason = static_cast<u8>(high >> 32);
+            if (reason >= FIRST_INTERRUPT_FAULT)
+                log("[iommu] blocked an interrupt message by device ", source >> 8, ":", (source >> 3) & 31, ".",
+                    source & 7, " (reason ", Hex{reason}, ")");
+            else
+                log("[iommu] blocked a DMA ", (high >> 62) & 1 ? "read" : "write", " by device ", source >> 8, ":",
+                    (source >> 3) & 31, ".", source & 7, " at ", Hex{address}, " (reason ", reason, ")");
             write64(u, at + 8, 1ull << 63); // clear the record
         }
         write32(u, FSTS, read32(u, FSTS)); // clear overflow / pending

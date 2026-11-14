@@ -33,11 +33,11 @@ file loader.
 | User stack guard | **Enforced (§7)** | Programs must load below 4 GiB. The stack sits below 128 TiB with nothing mapped under it but shared memory far below. |
 | Handles | **Capabilities (§8)** | Each handle has rights (read, write, transfer, duplicate, revoke, MMIO, DMA) and a generation counter, and can be revoked. Rights only shrink. |
 | Who reaches hardware | **Enforced by delegation and rights (§8)** | Only init gets IRQ, I/O-port and PCI handles. It strips them to what each driver uses before moving them, so drivers can't pass devices on. |
-| DMA isolation | **Enforced with VT-d (§10)** | Each device reaches only the buffers its driver registered. Without VT-d hardware, unconfined (logged). |
+| DMA isolation | **Enforced with VT-d (§10, §12)** | Each device reaches only the buffers its driver registered, and can't send interrupt messages (interrupt remapping). Without VT-d hardware, unconfined (logged). |
 | Kernel memory accounting | **Added in §6 and §7** | A 4 MiB kernel reserve, plus a per-program quota of half of RAM. |
-| Boot integrity | **None** | ShoolLoader and Limine load every module with no signature or hash. |
+| Boot integrity | **Signed on UEFI, hashed on BIOS (§11)** | ShoolLoader boots only files in an Ed25519-signed list and refuses older boot images. Limine checks a BLAKE2B hash per file and an enrolled config hash. |
 | TLS server authentication | **Enforced (§10)** | Chain to a trusted root, hostname, dates, and the CertificateVerify signature. Fails closed. |
-| Package integrity | **Enforced (§10)** | Ed25519-signed packages, trusted keys in the boot image, no rollback. |
+| Package integrity | **Enforced (§10, §11)** | Ed25519-signed packages and repository indexes, trusted keys in the boot image, no rollback. Checked again at every launch. |
 | App isolation from data | **Enforced (§9)** | Installed apps see only their own folder and no network unless the user grants more. Built-ins get fixed profiles. |
 | RNG | **Reasonable** | ChaCha20 DRBG keyed from RDRAND (when present), TSC jitter and IRQ timing. It rekeys before and after each output. There is no reseed-health check, and TSC-only seeding (no RDRAND) is weak early in boot. |
 
@@ -75,7 +75,7 @@ firmware↔ShoolLoader↔kernel.
 | T3 | Hostile app reads or alters every file, including other apps' `app.elf` | full `fs` channel | Data theft, persistence, trojaning other apps | **Open, critical** |
 | T4 | Compromised NIC driver DMAs over kernel memory | `SYS_DMA_ADDRESS` + bus master, no IOMMU | Kernel compromise | **Open, high (needs VT-d)** |
 | T5 | MITM on HTTPS | no X.509 validation | Credential theft, content injection | **Open, high** |
-| T6 | Boot media tampering | no verified boot | Persistent kernel compromise | **Open, high** |
+| T6 | Boot media tampering | no verified boot | Persistent kernel compromise | **Mitigated (§11)**; the loader itself needs UEFI Secure Boot |
 | T7 | Memory corruption in a parser (HTML, PNG/JPEG, TCP, FAT) | not reviewed | Compromise of that one task (contained by isolation) | **Unknown: fuzz** |
 | T8 | Kernel exploit made easier | no SMEP/SMAP, no stack guards | Escalation from a kernel bug | **Mitigation gap** |
 
@@ -138,7 +138,7 @@ replaced or read by any app.
 | 5 | ✅ SMEP and SMAP | arch/protect, syscall copy paths | §7 | – | S / M | `FAULT_TEST=smep\|smap` |
 | 6 | ✅ Handle rights, generations, revocation | object, task, syscalls | §8 | – | M | harden-test |
 | 7 | ✅ Kernel stack guard pages | sched | §7 | – | M | `FAULT_TEST=stack` |
-| 8 | Verified boot | shoolloader | Hash every module and verify a signed manifest. Document the Limine/BIOS path as unverified | P2's signature code | M | Altered module refused |
+| 8 | ✅ Verified boot | shoolloader, Makefile | §11 | P2's signature code | M | Altered module refused |
 | 9 | Capture service + firewall hook | e1000/rtl8139, net | Shared-memory ring, policy in `net` | P1 | L | Fuzzed frames; policy tests |
 | 10 | VT-d | new kernel ACPI DMAR + IOMMU code | Per-device page tables | ACPI parsing | XL | QEMU `-device intel-iommu`: DMA outside a mapping faults |
 | – | Fuzzing harness | hosted builds of ELF loader, BPK, PNG/JPEG, HTML, TCP parsers | libFuzzer + ASan on Linux host | – | M | Corpus runs clean |
@@ -290,6 +290,39 @@ which means writing `/apps` and `/var`.
 - A lost signing key means packages built with a new key won't update
   installed ones signed by the old key, unless both keys are in
   `trust.bin`.
-- VT-d needs the hardware. Interrupt remapping is not done (devices use the
-  legacy PIC). AMD IOMMU is not supported. A compromised driver can still
-  misuse the buffers it registered.
+- VT-d needs the hardware. AMD IOMMU is not supported. A compromised driver
+  can still misuse the buffers it registered. Interrupt remapping: see §12.
+
+## 11. Supply chain: boot, repositories, installs
+
+| Item | Design | Checked by |
+|---|---|---|
+| Signed boot modules, kernel verification | The build writes `shool.sum` (`version N` plus the SHA-256 of the kernel, every module and `shool.cfg`) and signs it with `keys/boot-signing.pem` as `shool.sig`. ShoolLoader has the public key built in (`build/boot-key.h`). It refuses to boot when the signature is wrong or missing, and when any file it loads is unlisted or changed. `shool.cfg` is listed, so it can't point `kernel =` at another signed file. | UEFI tests: an untouched image boots. A changed `init.elf`, a re-hashed but unsigned `shool.sum`, a `shool.cfg` with `kernel = /boot/init.elf`, and a missing `shool.sig` are each refused, with the reason on screen. |
+| BIOS path | `build/limine.conf` gets a BLAKE2B hash after every path, and `limine enroll-config` writes the config's hash into the ISO's `limine-bios.sys`. | A changed `init.elf`: Limine panics with "Blake2b hash … does not match". An edited `limine.conf`: "CHECKSUM MISMATCH FOR CONFIG FILE". |
+| Boot anti-rollback | `BOOT_VERSION` (Makefile) is the image's security version. ShoolLoader keeps the highest that has booted in the UEFI variable `BhairavBootVersion`, set non-volatile and boot-services only, so the running OS can't change it. A variable with other attributes or another size isn't ours, so it's replaced. An older image is refused. | OVMF with persistent variables: version 2 boots, then version 1 is refused ("rollback refused"). |
+| Signed repository metadata | `make repo` writes `Packages` starting with `serial = <time>`, adds `sha256 =` per package, and signs it as `Packages.sig` (package key). `apt update` refuses an index that's unsigned or wrongly signed, has no serial, or has a serial lower than the last one read from that repository (`/var/apt/serials/`). `apt install` from a repository refuses a package whose SHA-256 or version differs from the signed index. | A served repo: the signed index is accepted. The same index with one line changed is refused ("isn't signed by a trusted publisher"). A properly signed index with an older serial is refused ("older than one already read"). |
+| Package anti-rollback | §10 (an update never installs an older version), plus the index's version and hash binding above, so a mirror can't swap in an older signed build. | §10 |
+| Trusted key management | Separate roles: the boot key only signs boot images and lives in the loader. The package key signs packages and indexes and lives in `trust.bin`, which is itself a signed boot file. `keys/trusted/*.pem` adds more public keys (rotation: keep the old key's public half there; revocation: delete it, rebuild). Up to 15 extra keys. New keys are made with `umask 077`. | Build: `trust.bin` holds the key count and keys. Boot: `trust.bin` is checked like every other boot file. |
+| Secure installation | `installPackage` keeps the signed package as `/apps/<id>/package.bpk` (written first) plus its manifest and icon, and deletes any old `app.elf`. KamalShell never runs a bare program file. At every launch it reads the package and checks the signature, that it's this app's (not another app's signed package, which would run with this app's grants), and that it matches the installed manifest. Only then does it run the `app.elf` inside. A failed check logs why and doesn't start the app. | Code review. The same check (`loadInstalled`) is what `apt verify` runs, tested below. |
+| Recovery verification | `apt verify` re-checks every installed app and names each failure. `apt install <id>` repairs a failed app from its signed source even at the same version. | On a copy of the user's disk: Clock, installed before this change, shows `FAILED … its package is missing`. After `apt install clock`, `apt verify` shows `ok clock 1.0`. |
+
+**Limits.**
+- The root of trust is `BOOTX64.EFI` on the medium. Anyone who can rewrite the whole medium can replace the loader, and the BIOS path's `limine-bios.sys`. Closing that needs UEFI Secure Boot with the loader signed by a key in the firmware's `db` (not set up). The BIOS path has hashes but no signature.
+- Boot rollback state is a UEFI variable. A physical attacker with a UEFI shell, or someone resetting NVRAM, can clear it. QEMU's `-bios OVMF.fd` (as `make run-uefi` uses) doesn't persist variables at all.
+- Index serials stop replays of older indexes, but not a freeze: an attacker can keep serving the latest signed index forever, hiding new updates. That would need an expiry date in the index.
+- Installed apps are checked against `trust.bin`, not against what was installed, so swapping an app's package for an older signed version of the same app (offline) isn't caught. Removing a repository forgets its serial.
+- Apps installed before this change don't start until reinstalled (`apt verify` lists them).
+- A lost boot key means new images need a new loader. A lost package key is handled as in §10, with `keys/trusted/`.
+
+## 12. VT-d interrupt remapping
+
+**Investigation.** DMA remapping (§10) gives each device its own domain: a page table holding only the buffers its driver registered with `dma_address`, unmapped and flushed before the memory is reused. But a device write to `0xFEExxxxx` isn't DMA. It's an interrupt message (MSI), and DMA remapping doesn't translate it. A compromised driver can point its device's MSI anywhere and raise any vector, an NMI or an SMI. Every interrupt Bhairav OS uses arrives through the legacy 8259 PIC as a wire: the kernel programs no LAPIC, IOAPIC, MSI or MSI-X. So no device has a legitimate reason to send an interrupt message.
+
+| Item | Design | Checked by |
+|---|---|---|
+| Interrupt remapping | When every DRHD unit reports ECAP.IR, `Iommu::init` installs a 256-entry interrupt remapping table (xAPIC format) with every entry not present, then sets SIRTP and IRE. GCMD.CFI stays clear, so compatibility-format messages are blocked too. GSTS is read back: the log says "on" only if IRES is set and CFIS is clear. Blocked messages appear in the fault log with the device and reason. Without IR support the log says devices can still send interrupt messages. | `IOMMU=1`: every boot check passes with remapping on. `IOMMU=1 FAULT_TEST=msi`: the kernel aims the SATA controller's MSI at CPU 0 as an NMI, and the AHCI driver turns its interrupts on. Result: `blocked an interrupt message by device 0:31.2 (reason 0x22)`, and the system keeps running. With `IOMMU=dma-only`, the same NMI arrives: `ahci (task 10) crashed: non-maskable interrupt`. |
+
+**Limits.**
+- QEMU 8.2 doesn't model the compatibility-format block. It reports CFIS clear but passes such messages anyway, so the test uses the remappable format, which reaches our table. Real VT-d hardware blocks both formats. This hasn't been tried on real hardware.
+- The interrupt entry cache isn't invalidated (that needs queued invalidation). That's safe while remapping starts off and the table never changes. A driver using MSI would need table entries with source-id checking (SVT/SID) plus queued invalidation.
+- An NMI that does arrive (without interrupt remapping) is treated as a fault of whatever task is running, which kills that task.

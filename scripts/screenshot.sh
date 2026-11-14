@@ -10,7 +10,8 @@
 #                 QEMU monitor commands to run after KEYS (tests the mouse)
 #   NIC=e1000     the network card: e1000 or rtl8139
 #   CPU=max       QEMU CPU model (max has SMEP and SMAP; the default has neither)
-#   IOMMU=1       add an Intel VT-d IOMMU (DMA remapping)
+#   IOMMU=1       add an Intel VT-d IOMMU (DMA and interrupt remapping);
+#                 IOMMU=dma-only leaves interrupt remapping out
 #   STEP=0.3      seconds between MONITOR commands (lower it for double clicks)
 #   REPO=build/repo  serve this folder on port 8080 meanwhile (apt tests)
 set -eu
@@ -35,7 +36,10 @@ fi
 
 IOMMU_DEVICE=""
 if [ -n "${IOMMU:-}" ]; then
-    IOMMU_DEVICE="-device intel-iommu,intremap=off" # before the devices it translates
+    IOMMU_DEVICE="-device intel-iommu,intremap=on" # before the devices it translates
+    if [ "$IOMMU" = "dma-only" ]; then
+        IOMMU_DEVICE="-device intel-iommu,intremap=off" # VT-d without interrupt remapping
+    fi
 fi
 # shellcheck disable=SC2086
 set -- -M q35 -m "$MEMORY" $IOMMU_DEVICE -cdrom "$ISO" -boot d \

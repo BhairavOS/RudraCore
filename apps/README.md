@@ -96,6 +96,12 @@ apt update
 apt install calculator
 ```
 
+The index is signed (`Packages.sig`, by the package key), starts with a
+`serial` (the time `make repo` ran), and lists each package's SHA-256. apt
+refuses an unsigned or changed index, an older one than it last read, and a
+package that isn't exactly what the index lists. Run `make repo` again
+whenever anything changes; don't edit `Packages` by hand.
+
 To publish for real, copy `build/repo/` to any web server and share its
 address. To release a new version, raise `version` in the manifest and run
 `make repo` again: `apt upgrade` installs it.
@@ -109,7 +115,15 @@ a 32-bit size and the bytes (`tools/bpk.cpp` makes them; details in
 Packages are signed: `make packages` signs each with `keys/package-signing.pem`
 (made the first time, never committed; keep it), and the boot image's
 `trust.bin` holds its public key. Bhairav OS refuses unsigned or altered
-packages, and updates that go back to an older version.
+packages, and updates that go back to an older version. The installed app
+keeps its signed package (`/apps/<id>/package.bpk`), which is checked again
+every time it starts; `apt verify` checks all of them.
+
+To rotate the key, copy the old key's public half to `keys/trusted/`
+(`openssl pkey -in keys/package-signing.pem -pubout -out keys/trusted/old.pem`),
+then make a new `keys/package-signing.pem`: both are trusted until you delete
+`keys/trusted/old.pem`. Boot images are signed by a separate key,
+`keys/boot-signing.pem` (see `docs/SECURITY.md` §11).
 
 More permissions in the manifest: `permissions = folder` asks for one of the
 user's folders (the user picks it; the app sees it as `/shared`), and

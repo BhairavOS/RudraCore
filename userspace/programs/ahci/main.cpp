@@ -8,6 +8,8 @@
 // each command by polling (spinning briefly, then yielding). The disk reads
 // and writes the client's shared buffer directly (DMA).
 
+#include "config.h"
+
 #include <kapala/channel.h>
 #include <kapala/protocol/block.h>
 #include <kapala/sys.h>
@@ -237,6 +239,12 @@ private:
         port(PxSERR) = ~0u; // clear old errors
         port(PxIS) = ~0u;
         port(PxIE) = 0;     // polling, no interrupts
+        if constexpr (RUDRACORE_FAULT_TEST == 5) {
+            // FAULT_TEST=msi: interrupts on, as a compromised driver could,
+            // so the controller sends the message the kernel aimed at the CPU.
+            port(PxIE) = ~0u;
+            reg(GHC) = reg(GHC) | 2; // GHC.IE
+        }
         port(PxCMD) = port(PxCMD) | CMD_FRE;
         return true;
     }
